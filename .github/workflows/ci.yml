@@ -28,6 +28,7 @@ jobs:
         run: npx playwright install --with-deps chromium
         timeout-minutes: 8
       - name: "Step 5: Run unit, API and browser tests"
+        shell: bash # "bash" adds -o pipefail, so a failing test fails the step even through tee
         run: npm test 2>&1 | tee test-output.txt
       - name: Report the failure
         if: failure()
