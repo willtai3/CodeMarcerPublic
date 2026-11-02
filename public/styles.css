@@ -118,3 +118,4 @@ details p { margin: 6px 0; max-width: 46ch; }
 .job .msg:empty { display: none; }
 .team-add { margin-top: 20px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .team-add .primary { justify-self: start; }
+.board .more { list-style: none; }

@@ -69,6 +69,9 @@ test('engineer lists themselves and is live at once; public profile hides privat
   mayaC = cookieOf(r);
   assert.equal((await post(base, '/api/engineers', { ...ENGINEER, email: 'MAYA@example.com' })).status, 409, 'email taken, case-insensitive');
   maya = (await json(await get('/api/engineers'))).find(e => e.name === 'Maya R.');
+  // Two sign-ups with the same new email at the same moment: exactly one wins.
+  const race = await Promise.all([1, 2].map(() => post(base, '/api/engineers', { ...ENGINEER, name: 'Quokka Twin', email: 'twin@example.com' })));
+  assert.deepEqual(race.map(r => r.status).sort(), [201, 409], 'concurrent sign-ups with one email');
   assert.deepEqual(Object.keys(maya).sort(), ['about', 'available', 'created', 'headline', 'id', 'name', 'packages', 'portfolio', 'rate', 'skills', 'terms']);
 });
 

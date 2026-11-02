@@ -54,7 +54,7 @@ Public surface: GET /, /admin (page shell only), /app.js, /admin.js, /ui.js, /fe
 
 ## Tests
 
-`npm test` runs unit, API and browser tests (Playwright Chromium must be installed). `SHOTS=<folder>` saves screenshots.
+`npm test` runs unit, API, browser and scale tests (Playwright Chromium must be installed). The scale test loads 5,000 engineers and times the list, search and paging against fixed limits. `SHOTS=<folder>` saves screenshots.
 
 ## License
 

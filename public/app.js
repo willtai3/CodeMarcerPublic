@@ -39,11 +39,17 @@ const sentence = s => s.replace(/\.$/, '') + '.'; // "Maya R." doesn't end up wi
 const fields = form => Object.fromEntries([...new FormData(form)].filter(([k]) => !k.startsWith('pkg-')));
 
 // ---- Find an engineer ----
-let engineers = [], index = [], lastList;
+// Search runs over one prepared text per engineer; only the first PAGE matches are drawn, more on request.
+const PAGE = 50;
+let engineers = [], index = [], lastList, matches = [], limit = PAGE;
 const words = () => $('#q').value.toLowerCase().split(/[,\s]+/).filter(Boolean);
+// "Show more" appends the next page under the cards already drawn, so an open hire form stays open.
+const moreRow = () => { const rest = matches.length - limit; return rest > 0 ? [h('li', { className: 'more' }, h('button', { className: 'quiet', type: 'button', textContent: `Show ${Math.min(rest, PAGE)} more of ${rest}`, onclick: e => { e.currentTarget.closest('li').remove(); $('#list').append(...matches.slice(limit, limit += PAGE).map(card), ...moreRow()); } }))] : []; };
 const renderList = () => {
-  const q = words(), shown = engineers.filter((e, i) => q.every(w => index[i].includes(w)));
-  $('#list').replaceChildren(...shown.map(card), ...(shown.length ? [] : [h('li', { className: 'empty', textContent: engineers.length ? 'No engineers match that search.' : 'No engineers listed yet.' })]));
+  const q = words();
+  matches = q.length ? engineers.filter((e, i) => q.every(w => index[i].includes(w))) : engineers; limit = PAGE;
+  $('#list').replaceChildren(...matches.slice(0, limit).map(card), ...moreRow(),
+    ...(matches.length ? [] : [h('li', { className: 'empty', textContent: engineers.length ? 'No engineers match that search.' : 'No engineers listed yet.' })]));
 };
 const loadList = async () => {
   try {
