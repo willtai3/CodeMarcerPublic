@@ -200,7 +200,19 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   for (const t of ['Engineers', 'Clients', 'Jobs', 'Team']) assert.equal(await page.getByRole('tab', { name: t }).isVisible(), true, t);
 
   await page.getByRole('tab', { name: 'Jobs' }).click();
-  assert.match(await page.locator('#ledger tr', { hasText: 'Deploy your app' }).textContent(), /Complete\$450\$0Confirmed/);
+  const completed = page.locator('#ledger tbody tr', { hasText: 'Complete' });
+  assert.match(await completed.textContent(), /CompleteConfirmed\$450\$0$/, 'default columns: key columns plus check, amount and fee');
+  // Columns menu: Work is opt-in; turning it on shows it and is remembered after a reload.
+  assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
+  await page.locator('#ledger summary', { hasText: 'Columns' }).click();
+  await page.locator('#ledger .cols-list').getByLabel('Work').check();
+  await page.locator('#ledger th', { hasText: 'Work' }).waitFor();
+  assert.match(await page.locator('#ledger tbody tr', { hasText: 'Complete' }).textContent(), /Deploy your app with HTTPS/);
+  await page.reload();
+  await page.locator('#ledger th', { hasText: 'Work' }).waitFor();
+  await page.locator('#ledger summary', { hasText: 'Columns' }).click();
+  await page.locator('#ledger .cols-list').getByLabel('Work').uncheck();
+  assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
   await page.getByRole('tab', { name: 'Clients' }).click();
   const ann = page.locator('#clients tr', { hasText: 'Ann' });
   await ann.getByRole('button', { name: 'Set password' }).click();
@@ -242,7 +254,14 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await mo.page.getByText('Maya R. is now shown on the site.').waitFor();
 
   // Owner removes Mo; Mo's next action fails and returns to the sign-in form.
-  await page.locator('#team tr', { hasText: 'mo@example.com' }).getByRole('button', { name: 'Remove' }).click();
+  const moRow = page.locator('#team tr', { hasText: 'mo@example.com' });
+  await moRow.getByRole('button', { name: 'Remove Mo' }).click();
+  await moRow.getByText('Remove Mo?').waitFor();
+  await moRow.getByRole('button', { name: 'Cancel' }).click();
+  assert.equal(await moRow.getByRole('button', { name: 'Remove Mo' }).isVisible(), true, 'cancel keeps the member');
+  await moRow.getByRole('button', { name: 'Remove Mo' }).click();
+  assert.equal(await moRow.locator('.danger').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(229, 37, 28)', 'confirm button is red #e5251c');
+  await moRow.getByRole('button', { name: 'Remove', exact: true }).click();
   await page.getByText('Mo removed. They are signed out everywhere.').waitFor();
   await row.getByRole('button', { name: 'Hide' }).click();
   await mo.page.getByText('Signed out. Sign in again.').waitFor();
@@ -263,6 +282,19 @@ test('phone: no sideways scroll on every tab and the hire form; screenshots', as
     await page.locator(`[data-tab=${tab}]`).click();
     assert.equal(await noSideScroll(page), true, tab);
     await shot(page, 'phone-' + tab);
+  }
+  await done();
+});
+
+test('controls line up at phone, tablet and desktop widths (34px, 28px small)', async () => {
+  const { page, done } = await open('/#engineers');
+  for (const width of [375, 800, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const sel of ['#signin .row', '#profile .row', '#profile .pkg']) {
+      const boxes = await page.locator(`${sel} :is(input, select, button)`).evaluateAll(els => els.filter(e => e.offsetParent).map(e => Math.round(e.getBoundingClientRect().height)));
+      assert.ok(boxes.length && boxes.every(hgt => hgt === 34), `${sel} at ${width}px: heights ${boxes.join(', ')}`);
+    }
+    assert.equal(await noSideScroll(page), true, `no sideways scroll at ${width}px`);
   }
   await done();
 });
