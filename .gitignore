@@ -1,0 +1,6 @@
+# Live data and secrets never go in the repo
+data/
+.env
+*.tmp
+node_modules
+npm-debug.log*
