@@ -23,6 +23,7 @@
 
 - Work on a branch and open a pull request into `main`. Don't push to `main`.
 - CI must be green (tests and the secret scan) before merge.
+- When a check fails, CI reports it by itself: a comment on the pull request, or an issue labelled `failure` for `main`, naming the step that failed and the raw output.
 - Every bug fix or feature comes with a test that would have caught it.
 - Any route reachable without signing in must be added to the public list in `test/api.test.js` on purpose.
 - Never loosen a security header, cookie setting or rate limit without saying so in the PR: what changed, what it protected against, and why it's acceptable.
