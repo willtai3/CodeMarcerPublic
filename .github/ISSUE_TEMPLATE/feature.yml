@@ -1,0 +1,10 @@
+name: Improvement to the site
+description: Suggest a change to the site. Building it is paid work hired through the site.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
