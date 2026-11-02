@@ -286,17 +286,22 @@ test('phone: no sideways scroll on every tab and the hire form; screenshots', as
   await done();
 });
 
-test('controls line up at phone, tablet and desktop widths (34px, 28px small)', async () => {
-  const { page, done } = await open('/#engineers');
-  for (const width of [375, 800, 1280]) {
-    await page.setViewportSize({ width, height: 900 });
-    for (const sel of ['#signin .row', '#profile .row', '#profile .pkg']) {
-      const boxes = await page.locator(`${sel} :is(input, select, button)`).evaluateAll(els => els.filter(e => e.offsetParent).map(e => Math.round(e.getBoundingClientRect().height)));
-      assert.ok(boxes.length && boxes.every(hgt => hgt === 34), `${sel} at ${width}px: heights ${boxes.join(', ')}`);
+test('controls line up at phone, tablet and desktop widths (34px), with no sideways scroll even in a wide fallback font', async () => {
+  // CI machines lack Carlito/Calibri; a wide fallback font (DejaVu Sans) must not push the page sideways either.
+  for (const font of [null, '"DejaVu Sans"']) {
+    const { page, done } = await open('/#engineers', { bypassCSP: !!font });
+    if (font) await page.addStyleTag({ content: `body, button, input, select, textarea { font-family: ${font}, sans-serif !important; }` });
+    for (const width of [375, 800, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const sel of ['#signin .row', '#profile .row', '#profile .pkg']) {
+        const boxes = await page.locator(`${sel} :is(input, select, button)`).evaluateAll(els => els.filter(e => e.offsetParent).map(e => Math.round(e.getBoundingClientRect().height)));
+        assert.ok(boxes.length && boxes.every(hgt => hgt === 34), `${sel} at ${width}px (${font ?? 'default font'}): heights ${boxes.join(', ')}`);
+      }
+      const over = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, window: innerWidth, wide: [...document.querySelectorAll('header *, main > :not(.tabs) *, footer')].filter(e => !e.closest('.tabs, .scroll') && e.getBoundingClientRect().right > innerWidth + 0.5).map(e => `${e.tagName.toLowerCase()}.${e.className} ends at ${Math.round(e.getBoundingClientRect().right)}`).slice(0, 5) }));
+      assert.ok(over.page <= over.window, `sideways scroll at ${width}px (${font ?? 'default font'}): page ${over.page}px wide in a ${over.window}px window; too wide: ${over.wide.join('; ')}`);
     }
-    assert.equal(await noSideScroll(page), true, `no sideways scroll at ${width}px`);
+    await done();
   }
-  await done();
 });
 
 test('buttons: hover grows 1.06, off under reduced motion; form controls line up at 34px', async () => {
