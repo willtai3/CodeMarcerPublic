@@ -12,7 +12,7 @@ step="${step:-an unnamed step (see the run)}"
 {
   echo "**Job:** $job"
   echo "**Failed at:** $step"
-  echo "**Commit:** ${GITHUB_SHA:0:7}"
+  sha="${PR_HEAD_SHA:-$GITHUB_SHA}"; echo "**Commit:** ${sha:0:7}"
   echo "**Run:** $run_url"
   if [ -n "$out" ] && [ -s "$out" ]; then
     echo
