@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: I vibecoded an app and need an engineer
+    url: https://codemarcer.com/#find
+    about: Browse engineers and hire one on the site. Issues here are only for the site's own code.
+  - name: I'm an engineer and want paid work (including on this repo)
+    url: https://codemarcer.com/#engineers
+    about: List your rate and packages on the site. Work on this codebase is hired there too.
+  - name: Report a security problem
+    url: https://github.com/willtai3/CodeMarcerPublic/security/advisories/new
+    about: Report privately. Don't open a public issue.

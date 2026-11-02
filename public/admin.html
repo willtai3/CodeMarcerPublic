@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>CodeMarcer admin</title>
+<link rel="icon" href="/favicon.svg">
+<link rel="stylesheet" href="/styles.css">
+<script type="module" src="/admin.js"></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h7m0 0-3-3m3 3-3 3M13 6h7v12h-7"/></svg>CodeMarcer</a>
+  <button class="quiet" id="logout" type="button" hidden>Sign out</button>
+</header>
+<main class="wide">
+  <form id="login" class="login" novalidate>
+    <label>Email<input name="email" type="email" required autocomplete="username"></label>
+    <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
+    <button class="primary">Sign in</button>
+    <p class="msg" role="status"></p>
+  </form>
+  <div id="app" hidden>
+    <p class="summary" id="summary"></p>
+    <nav class="tabs" role="tablist" aria-label="Admin">
+      <button role="tab" data-tab="roster" data-perm="moderate">Engineers</button>
+      <button role="tab" data-tab="clients" data-perm="accounts">Clients</button>
+      <button role="tab" data-tab="ledger" data-perm="money">Jobs</button>
+      <button role="tab" data-tab="team" data-perm="staff">Team</button>
+    </nav>
+    <section role="tabpanel" id="roster" hidden></section>
+    <section role="tabpanel" id="clients" hidden></section>
+    <section role="tabpanel" id="ledger" hidden></section>
+    <section role="tabpanel" id="team" hidden></section>
+    <p class="msg" id="status" role="status"></p>
+  </div>
+</main>
+</body>
+</html>
