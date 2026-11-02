@@ -4,7 +4,7 @@
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 Calibri, Carlito, "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif; }
 a { color: inherit; }
-.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 20px; text-decoration: none; }
 .brand svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .promo { font-size: 14px; padding: 4px 10px; border: 1px solid var(--fg); border-radius: 999px; white-space: nowrap; }
@@ -118,4 +118,11 @@ details p { margin: 6px 0; max-width: 46ch; }
 .job .msg:empty { display: none; }
 .team-add { margin-top: 20px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .team-add .primary { justify-self: start; }
+.cols-bar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.cols { position: relative; }
+.cols summary { list-style: none; cursor: pointer; font-weight: 400; }
+.cols summary::-webkit-details-marker { display: none; }
+.cols-list { position: absolute; right: 0; z-index: 5; display: grid; gap: 6px; min-width: 180px; margin-top: 6px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
+.more-rows { margin-top: 12px; }
+.danger { background: #e5251c; border-color: #e5251c; color: #fff; }
 .board .more { list-style: none; }

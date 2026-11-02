@@ -200,7 +200,19 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   for (const t of ['Engineers', 'Clients', 'Jobs', 'Team']) assert.equal(await page.getByRole('tab', { name: t }).isVisible(), true, t);
 
   await page.getByRole('tab', { name: 'Jobs' }).click();
-  assert.match(await page.locator('#ledger tr', { hasText: 'Deploy your app' }).textContent(), /Complete\$450\$0Confirmed/);
+  const completed = page.locator('#ledger tbody tr', { hasText: 'Complete' });
+  assert.match(await completed.textContent(), /CompleteConfirmed\$450\$0$/, 'default columns: key columns plus check, amount and fee');
+  // Columns menu: Work is opt-in; turning it on shows it and is remembered after a reload.
+  assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
+  await page.locator('#ledger summary', { hasText: 'Columns' }).click();
+  await page.locator('#ledger .cols-list').getByLabel('Work').check();
+  await page.locator('#ledger th', { hasText: 'Work' }).waitFor();
+  assert.match(await page.locator('#ledger tbody tr', { hasText: 'Complete' }).textContent(), /Deploy your app with HTTPS/);
+  await page.reload();
+  await page.locator('#ledger th', { hasText: 'Work' }).waitFor();
+  await page.locator('#ledger summary', { hasText: 'Columns' }).click();
+  await page.locator('#ledger .cols-list').getByLabel('Work').uncheck();
+  assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
   await page.getByRole('tab', { name: 'Clients' }).click();
   const ann = page.locator('#clients tr', { hasText: 'Ann' });
   await ann.getByRole('button', { name: 'Set password' }).click();
@@ -242,7 +254,14 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await mo.page.getByText('Maya R. is now shown on the site.').waitFor();
 
   // Owner removes Mo; Mo's next action fails and returns to the sign-in form.
-  await page.locator('#team tr', { hasText: 'mo@example.com' }).getByRole('button', { name: 'Remove' }).click();
+  const moRow = page.locator('#team tr', { hasText: 'mo@example.com' });
+  await moRow.getByRole('button', { name: 'Remove Mo' }).click();
+  await moRow.getByText('Remove Mo?').waitFor();
+  await moRow.getByRole('button', { name: 'Cancel' }).click();
+  assert.equal(await moRow.getByRole('button', { name: 'Remove Mo' }).isVisible(), true, 'cancel keeps the member');
+  await moRow.getByRole('button', { name: 'Remove Mo' }).click();
+  assert.equal(await moRow.locator('.danger').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(229, 37, 28)', 'confirm button is red #e5251c');
+  await moRow.getByRole('button', { name: 'Remove', exact: true }).click();
   await page.getByText('Mo removed. They are signed out everywhere.').waitFor();
   await row.getByRole('button', { name: 'Hide' }).click();
   await mo.page.getByText('Signed out. Sign in again.').waitFor();
@@ -265,6 +284,24 @@ test('phone: no sideways scroll on every tab and the hire form; screenshots', as
     await shot(page, 'phone-' + tab);
   }
   await done();
+});
+
+test('controls line up at phone, tablet and desktop widths (34px), with no sideways scroll even in a wide fallback font', async () => {
+  // CI machines lack Carlito/Calibri; a wide fallback font (DejaVu Sans) must not push the page sideways either.
+  for (const font of [null, '"DejaVu Sans"']) {
+    const { page, done } = await open('/#engineers', { bypassCSP: !!font });
+    if (font) await page.addStyleTag({ content: `body, button, input, select, textarea { font-family: ${font}, sans-serif !important; }` });
+    for (const width of [375, 800, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      for (const sel of ['#signin .row', '#profile .row', '#profile .pkg']) {
+        const boxes = await page.locator(`${sel} :is(input, select, button)`).evaluateAll(els => els.filter(e => e.offsetParent).map(e => Math.round(e.getBoundingClientRect().height)));
+        assert.ok(boxes.length && boxes.every(hgt => hgt === 34), `${sel} at ${width}px (${font ?? 'default font'}): heights ${boxes.join(', ')}`);
+      }
+      const over = await page.evaluate(() => ({ page: document.documentElement.scrollWidth, window: innerWidth, wide: [...document.querySelectorAll('header *, main > :not(.tabs) *, footer')].filter(e => !e.closest('.tabs, .scroll') && e.getBoundingClientRect().right > innerWidth + 0.5).map(e => `${e.tagName.toLowerCase()}.${e.className} ends at ${Math.round(e.getBoundingClientRect().right)}`).slice(0, 5) }));
+      assert.ok(over.page <= over.window, `sideways scroll at ${width}px (${font ?? 'default font'}): page ${over.page}px wide in a ${over.window}px window; too wide: ${over.wide.join('; ')}`);
+    }
+    await done();
+  }
 });
 
 test('buttons: hover grows 1.06, off under reduced motion; form controls line up at 34px', async () => {

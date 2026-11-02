@@ -8,6 +8,28 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const table = (heads, rows, empty) => rows.length
   ? h('div', { className: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, heads.map(t => h('th', { textContent: t })))), h('tbody', {}, rows.map(cells => h('tr', {}, cells.map(c => h('td', {}, c)))))))
   : h('p', { className: 'empty', textContent: empty });
+const TRASH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
+
+// Column choices are a per-viewer convenience kept in this browser; the page works the same without storage.
+const saved = (k, fallback) => { try { return JSON.parse(localStorage.getItem(k)) ?? fallback; } catch { return fallback; } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const ROWS = 100;
+// A list table: the key columns always show; the rest are opt-in through its Columns menu (remembered).
+// Rows are drawn 100 at a time; "Show more" appends, so nothing already on screen is redrawn.
+const list = (name, cols, items, empty) => {
+  if (!items.length) return h('p', { className: 'empty', textContent: empty });
+  const key = `cols:${name}`, on = new Set(saved(key, cols.filter(c => c.always || c.on).map(c => c.label)));
+  const shown = cols.filter(c => c.always || on.has(c.label)), body = h('tbody'), wrap = h('div');
+  let drawn = 0;
+  const more = () => { const rest = items.length - drawn; return rest > 0 ? h('button', { className: 'quiet more-rows', type: 'button', textContent: `Show ${Math.min(rest, ROWS)} more of ${rest}`, onclick: e => { e.currentTarget.remove(); page(); } }) : null; };
+  const page = () => { body.append(...items.slice(drawn, drawn += ROWS).map(it => h('tr', {}, shown.map(c => h('td', {}, c.cell(it)))))); const m = more(); m && wrap.append(m); };
+  const menu = h('details', { className: 'cols' }, h('summary', { className: 'small', textContent: 'Columns' }),
+    h('div', { className: 'cols-list' }, cols.filter(c => !c.always).map(c => h('label', { className: 'check' },
+      h('input', { type: 'checkbox', checked: on.has(c.label), onchange: e => { e.target.checked ? on.add(c.label) : on.delete(c.label); save(key, [...on]); wrap.replaceWith(list(name, cols, items, empty)); } }), c.label))));
+  wrap.append(h('div', { className: 'cols-bar' }, menu), h('div', { className: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, shown.map(c => h('th', { textContent: c.label })))), body)));
+  page();
+  return wrap;
+};
 const STATUS = { requested: 'New request', accepted: 'Accepted', paid: 'Paid', complete: 'Complete', declined: 'Declined', cancelled: 'Cancelled' };
 const CHECK = { confirmed: 'Confirmed', disputed: 'Disputed' };
 const ROLE = { owner: 'Owner', admin: 'Admin', moderator: 'Moderator' };
@@ -25,6 +47,13 @@ const setPassword = who => {
   const draw = () => slot.replaceChildren(small('Set password', open));
   draw(); return slot;
 };
+// Removing a member: a trash-can button, then a confirm step in place.
+const removeMember = s => {
+  const slot = h('span', { className: 'inline' });
+  const draw = () => slot.replaceChildren(h('button', { className: 'icon', type: 'button', ariaLabel: `Remove ${s.name}`, title: `Remove ${s.name}`, innerHTML: TRASH, onclick: confirm }));
+  const confirm = () => { slot.replaceChildren(h('span', { textContent: `Remove ${s.name}?` }), h('button', { className: 'small danger', type: 'button', textContent: 'Remove', onclick: act('/api/admin/staff/remove', { id: s.id }, `${s.name} removed. They are signed out everywhere.`) }), small('Cancel', draw)); $('.danger', slot).focus(); };
+  draw(); return slot;
+};
 const contactCell = (p, extra) => [h('strong', { textContent: p.name }), h('br'), h('span', { className: 'select', textContent: p.email }), extra];
 
 const render = ({ me, engineers, clients, jobs, totals, staff }) => {
@@ -33,23 +62,35 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
   if ($(`#app [data-tab="${location.hash.slice(1)}"]`)?.hidden !== false) showTab($('#app [data-tab]:not([hidden])').dataset.tab);
   $('#summary').textContent = `Signed in as ${ROLE[me.role]}. ${plural(engineers.length, 'engineer')} listed.` + (totals ? ` ${plural(totals.requested, 'job request')}, ${totals.completed} completed for ${usd(totals.billed)}. Fees owed: ${usd(totals.fees)}.${totals.disputed ? ` ${plural(totals.disputed, 'dispute')} to follow up.` : ''}` : '');
 
-  $('#roster').replaceChildren(table(['Engineer', 'Skills', 'Pricing', 'Jobs', 'Joined', 'Listing', ...(has('accounts') ? ['Account'] : [])], engineers.map(e => [
-    contactCell(e, [h('p', { className: 'meta', textContent: e.headline }), e.portfolio && a(e.portfolio, 'Portfolio')]),
-    e.skills.join(', '),
-    [e.rate ? `${usd(e.rate)}/hour` : 'No hourly rate', h('br'), plural(e.packages.length, 'package'), h('p', { className: 'meta', textContent: `Paid by ${e.payWith}` })],
-    String(e.jobs), date(e.created),
-    h('span', { className: 'inline' }, e.hidden ? 'Hidden' : e.available ? 'Live' : 'Live, not taking work', small(e.hidden ? 'Show' : 'Hide', act('/api/admin/hide', { id: e.id, hidden: !e.hidden }, `${e.name} is now ${e.hidden ? 'shown' : 'hidden'} on the site.`))),
-    ...(has('accounts') ? [setPassword(e)] : []),
-  ]), 'No engineers yet.'));
+  $('#roster').replaceChildren(list('engineers', [
+    { label: 'Engineer', always: true, cell: e => contactCell(e, h('p', { className: 'meta', textContent: e.headline })) },
+    { label: 'Listing', always: true, cell: e => h('span', { className: 'inline' }, e.hidden ? 'Hidden' : e.available ? 'Live' : 'Live, not taking work', small(e.hidden ? 'Show' : 'Hide', act('/api/admin/hide', { id: e.id, hidden: !e.hidden }, `${e.name} is now ${e.hidden ? 'shown' : 'hidden'} on the site.`))) },
+    { label: 'Skills', on: true, cell: e => e.skills.join(', ') },
+    { label: 'Pricing', cell: e => [e.rate ? `${usd(e.rate)}/hour` : 'No hourly rate', h('br'), plural(e.packages.length, 'package'), h('p', { className: 'meta', textContent: `Paid by ${e.payWith}` })] },
+    { label: 'Jobs', cell: e => String(e.jobs) },
+    { label: 'Portfolio', cell: e => e.portfolio ? a(e.portfolio, 'Portfolio') : '' },
+    { label: 'Joined', cell: e => date(e.created) },
+    ...(has('accounts') ? [{ label: 'Account', cell: setPassword }] : []),
+  ], engineers, 'No engineers yet.'));
 
-  if (clients) $('#clients').replaceChildren(table(['Client', 'Requests', 'Joined', 'Account'], clients.map(c => [contactCell(c), String(c.jobs), date(c.created), setPassword(c)]), 'No clients yet.'));
+  if (clients) $('#clients').replaceChildren(list('clients', [
+    { label: 'Client', always: true, cell: c => contactCell(c) },
+    { label: 'Requests', on: true, cell: c => String(c.jobs) },
+    { label: 'Joined', cell: c => date(c.created) },
+    { label: 'Account', on: true, cell: setPassword },
+  ], clients, 'No clients yet.'));
 
-  if (jobs) $('#ledger').replaceChildren(table(['Requested', 'Engineer', 'Client', 'Work', 'Quote', 'Status', 'Final amount', 'Fee', 'Client check'], jobs.map(j => [
-    date(j.created), j.engineer, contactCell(j.client),
-    j.choice.type === 'hourly' ? `${j.choice.hours} hours at ${usd(j.choice.rate)}/hour` : j.choice.title,
-    usd(j.quote), STATUS[j.status], j.amount == null ? '' : usd(j.amount), j.fee == null ? (j.pct ? `${j.pct}% when complete` : 'Free') : usd(j.fee),
-    j.clientCheck ? h('span', { className: `status ${j.clientCheck === 'disputed' ? 's-requested' : 's-complete'}`, textContent: CHECK[j.clientCheck] }) : '',
-  ]), 'No job requests yet.'));
+  if (jobs) $('#ledger').replaceChildren(list('jobs', [
+    { label: 'Requested', always: true, cell: j => date(j.created) },
+    { label: 'Engineer', always: true, cell: j => j.engineer },
+    { label: 'Client', always: true, cell: j => contactCell(j.client) },
+    { label: 'Status', always: true, cell: j => STATUS[j.status] },
+    { label: 'Client check', on: true, cell: j => j.clientCheck ? h('span', { className: `status ${j.clientCheck === 'disputed' ? 's-requested' : 's-complete'}`, textContent: CHECK[j.clientCheck] }) : '' },
+    { label: 'Work', cell: j => j.choice.type === 'hourly' ? `${j.choice.hours} hours at ${usd(j.choice.rate)}/hour` : j.choice.title },
+    { label: 'Quote', cell: j => usd(j.quote) },
+    { label: 'Final amount', on: true, cell: j => j.amount == null ? '' : usd(j.amount) },
+    { label: 'Fee', on: true, cell: j => j.fee == null ? (j.pct ? `${j.pct}% when complete` : 'Free') : usd(j.fee) },
+  ], jobs, 'No job requests yet.'));
 
   if (staff) {
     const form = h('form', { className: 'row team-add', noValidate: true },
@@ -64,7 +105,7 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
       table(['Member', 'Role', 'Added', ''], staff.map(s => [contactCell(s),
         h('select', { ariaLabel: `Role for ${s.name}`, onchange: e => act('/api/admin/staff/role', { id: s.id, role: e.target.value }, `${s.name} is now ${ROLE[e.target.value].toLowerCase()}.`)({ currentTarget: e.target }) },
           ['admin', 'moderator'].map(r => h('option', { value: r, textContent: ROLE[r], selected: r === s.role }))),
-        date(s.created), small('Remove', act('/api/admin/staff/remove', { id: s.id }, `${s.name} removed. They are signed out everywhere.`))]), 'No team members yet.'),
+        date(s.created), removeMember(s)]), 'No team members yet.'),
       form);
   }
 };
