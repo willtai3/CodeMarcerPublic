@@ -125,3 +125,4 @@ details p { margin: 6px 0; max-width: 46ch; }
 .cols-list { position: absolute; right: 0; z-index: 5; display: grid; gap: 6px; min-width: 180px; margin-top: 6px; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; }
 .more-rows { margin-top: 12px; }
 .danger { background: #e5251c; border-color: #e5251c; color: #fff; }
+.board .more { list-style: none; }
