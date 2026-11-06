@@ -9,7 +9,7 @@
     "build": "go build -trimpath -o bin/codemarcer .",
     "start": "go run .",
     "admin": "go run . admin",
-    "test": "npm run build && go test -count=1 ./... && node --test --test-concurrency=1 test/*.test.js"
+    "test": "npm run build && go test -race -count=1 ./... && node --test --test-concurrency=1 test/*.test.js"
   },
   "devDependencies": {
     "playwright": "1.63.0"

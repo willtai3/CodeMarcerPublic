@@ -17,9 +17,11 @@ step="${step:-an unnamed step (see the run)}"
   echo "**Run:** $run_url"
   if [ -n "$out" ] && [ -s "$out" ]; then
     echo
-    echo "Raw output of the failing tests (lines cut at 500 characters, first 150 lines):"
+    echo "Raw output of the failing tests (lines cut at 500 characters, first 150 lines; backticks shown as '):"
     echo '```'
-    { grep -E -A 14 '^\s*not ok' "$out" || tail -n 60 "$out"; } | cut -c 1-500 | head -n 150
+    # Test output can contain anything a pull request puts in it, so backticks become ' and the text can't close
+    # the code block and post its own markdown (links, mentions) in the comment.
+    { grep -E -A 14 '^\s*not ok' "$out" || tail -n 60 "$out"; } | cut -c 1-500 | head -n 150 | tr '`' "'"
     echo '```'
   fi
 } > report.md

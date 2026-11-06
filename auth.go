@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -22,26 +23,42 @@ const pbkdfIter = 600_000
 
 var hashSlots = make(chan struct{}, max(2, runtime.NumCPU())) // caps concurrent hashing so a burst of sign-ins can't pin every core
 
-func derive(pw string, salt []byte, iter int) []byte {
-	hashSlots <- struct{}{}
+// slotWait: how long a request waits for a free hashing slot before it is answered 503 "busy". Without a limit, a
+// flood of hashing requests queues every later sign-in behind it.
+var slotWait = 2 * time.Second
+
+var errBusy = errors.New("busy")
+
+func derive(pw string, salt []byte, iter int) ([]byte, error) {
+	t := time.NewTimer(slotWait)
+	defer t.Stop()
+	select {
+	case hashSlots <- struct{}{}:
+	case <-t.C:
+		return nil, errBusy
+	}
 	defer func() { <-hashSlots }()
 	k, _ := pbkdf2.Key(sha256.New, pw, salt, iter, 32)
-	return k
+	return k, nil
 }
 
-func hashPassword(pw string) *Hash {
+func hashPassword(pw string) (*Hash, error) {
 	salt := make([]byte, 16)
 	rand.Read(salt)
-	return &Hash{Alg: "pbkdf2-sha256", Iter: pbkdfIter, Salt: hex.EncodeToString(salt), Hash: hex.EncodeToString(derive(pw, salt, pbkdfIter))}
+	k, err := derive(pw, salt, pbkdfIter)
+	if err != nil {
+		return nil, err
+	}
+	return &Hash{Alg: "pbkdf2-sha256", Iter: pbkdfIter, Salt: hex.EncodeToString(salt), Hash: hex.EncodeToString(k)}, nil
 }
 
-var dummy = func() *Hash { return hashPassword("dummy password for timing") }()
+var dummy = func() *Hash { h, _ := hashPassword("dummy password for timing"); return h }()
 
 // verifyPassword always derives a hash (a dummy one when there is no account) so the response time doesn't reveal
 // which emails have accounts.
-func verifyPassword(h *Hash, pw string) bool {
+func verifyPassword(h *Hash, pw string) (bool, error) {
 	if utf8.RuneCountInString(pw) > 1024 {
-		return false
+		return false, nil
 	}
 	use := h
 	if use == nil || use.Alg != "pbkdf2-sha256" || use.Iter < 100_000 {
@@ -49,8 +66,11 @@ func verifyPassword(h *Hash, pw string) bool {
 	}
 	salt, err1 := hex.DecodeString(use.Salt)
 	want, err2 := hex.DecodeString(use.Hash)
-	got := derive(pw, salt, use.Iter)
-	return h == use && err1 == nil && err2 == nil && subtle.ConstantTimeCompare(got, want) == 1
+	got, err := derive(pw, salt, use.Iter)
+	if err != nil {
+		return false, err
+	}
+	return h == use && err1 == nil && err2 == nil && subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 // The owner account lives in DATA_DIR/admin.json, made with `codemarcer admin` on the server.
@@ -75,20 +95,43 @@ func setOwner(dir, email, pw string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	data, _ := json.Marshal(owner{Email: email, Hash: *hashPassword(pw)})
+	h, err := hashPassword(pw)
+	if err != nil {
+		return err
+	}
+	data, _ := json.Marshal(owner{Email: email, Hash: *h})
 	return atomicWrite(ownerFile(dir), data)
 }
 
-// ownerLogin: "setup" when no owner exists yet, "ok" for the right email and password, "" otherwise.
-func ownerLogin(dir, email, pw string) string {
+func readOwner(dir string) *owner {
 	data, err := os.ReadFile(ownerFile(dir))
 	var o owner
 	if err != nil || json.Unmarshal(data, &o) != nil {
-		verifyPassword(nil, pw)
-		return "setup"
+		return nil
 	}
-	if verifyPassword(&o.Hash, pw) && strings.ToLower(strings.TrimSpace(email)) == o.Email {
-		return "ok"
+	return &o
+}
+
+// ownerVersion identifies the current owner password: a new one (from `codemarcer admin`) has a new salt, so owner
+// sessions made before it stop working. "" when there is no owner.
+func ownerVersion(dir string) string {
+	if o := readOwner(dir); o != nil {
+		return o.Salt
 	}
 	return ""
+}
+
+// ownerLogin: "setup" when no owner exists yet, "ok" for the right email and password, "" otherwise; and the owner
+// version to keep in the session.
+func ownerLogin(dir, email, pw string) (string, string, error) {
+	o := readOwner(dir)
+	if o == nil {
+		_, err := verifyPassword(nil, pw)
+		return "setup", "", err
+	}
+	good, err := verifyPassword(&o.Hash, pw)
+	if good && strings.ToLower(strings.TrimSpace(email)) == o.Email {
+		return "ok", o.Salt, nil
+	}
+	return "", "", err
 }

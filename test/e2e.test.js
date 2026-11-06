@@ -109,7 +109,9 @@ test('client hires without an account: search, cancel, hourly quote, name/email/
   await form.getByRole('button', { name: 'Send request' }).click();
   await c.getByText('Request sent to Maya R.').waitFor();
   assert.equal((await c.locator('.done').textContent()).includes('R..'), false, 'no double period after a name ending in a dot');
-  assert.match(await c.locator('.done').textContent(), /Quote \$360\.Email them to agree the details: maya@example\.comThey take payment by Venmo @maya-r\. Payment terms: half upfront, half on completion\.They have your email and phone/);
+  const confirm = await c.locator('.done').textContent();
+  assert.match(confirm, /Quote \$360\.They have your email and phone and will contact you to agree the details and how to pay\. Payment terms: half upfront, half on completion\./);
+  assert.ok(!confirm.includes('maya@example.com') && !confirm.includes('Venmo'), "the engineer's email and payment handle aren't shown to whoever sends a request");
   await shot(page, 'desktop-hired');
 
   await page.locator('#q').fill('');
@@ -153,13 +155,27 @@ test('engineer dashboard: accept, mark paid, complete with cancel, edit profile,
   assert.equal(await card.getByRole('button').count(), 0, 'no hire buttons while unavailable');
   await page.getByRole('tab', { name: 'For engineers' }).click();
   await f.locator('[name="available"]').check();
-  await f.getByRole('button', { name: 'Save profile' }).click();
+  // Wait for this save to finish: "Profile saved." is still on the page from the last one, and a save clears the password fields.
+  await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/engineers') && r.request().method() === 'GET'), f.getByRole('button', { name: 'Save profile' }).click()]);
   await page.getByText(/Profile saved\./).waitFor();
+  await f.getByRole('button', { name: 'Save profile' }).and(page.locator(':enabled')).waitFor(); // enabled again only once the save is done
+  // A new password needs the current one.
+  await f.locator('[name="newPassword"]').fill('maya new password');
+  await f.locator('[name="currentPassword"]').fill('not my password');
+  await f.getByRole('button', { name: 'Save profile' }).click();
+  await f.getByText('Your current password is wrong.').waitFor();
+  assert.equal(await f.locator('[name="currentPassword"]').getAttribute('aria-invalid'), 'true');
+  await f.locator('[name="currentPassword"]').fill('maya password 1');
+  await f.getByRole('button', { name: 'Save profile' }).click();
+  await page.waitForFunction(() => document.querySelector('#profile [name="currentPassword"]').value === '');
   await page.locator('#engineers .signout').click();
   await page.getByRole('button', { name: 'List me' }).waitFor();
   await page.reload();
   await page.getByRole('button', { name: 'List me' }).waitFor();
-  await done();
+  await signIn(page.locator('#signin'), 'maya@example.com', 'maya new password');
+  await page.locator('#who', { hasText: /Signed in as Maya R\./ }).waitFor();
+  await page.locator('#engineers .signout').click();
+  await done(/status of 403/); // the wrong current password
 });
 
 test('staff: owner adds a moderator and an admin, moderator sees only engineers, removal signs them out', async () => {

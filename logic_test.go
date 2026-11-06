@@ -2,11 +2,14 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -165,23 +168,60 @@ func TestJobStatusOnlyMovesForward(t *testing.T) {
 }
 
 func TestPasswords(t *testing.T) {
-	h := hashPassword("long enough password")
-	if strings.Contains(h.Hash+h.Salt, "long enough") || h.Iter != 600_000 || h.Alg != "pbkdf2-sha256" {
-		t.Fatalf("hash looks wrong: %+v", h)
+	h, err := hashPassword("long enough password")
+	if err != nil || strings.Contains(h.Hash+h.Salt, "long enough") || h.Iter != 600_000 || h.Alg != "pbkdf2-sha256" {
+		t.Fatalf("hash looks wrong: %+v %v", h, err)
 	}
-	if !verifyPassword(h, "long enough password") || verifyPassword(h, "long enough passworD") || verifyPassword(nil, "long enough password") {
+	check := func(h *Hash, pw string) bool { ok, err := verifyPassword(h, pw); return ok && err == nil }
+	if !check(h, "long enough password") || check(h, "long enough passworD") || check(nil, "long enough password") {
 		t.Error("verify gave the wrong answer")
 	}
 	weak := *h
 	weak.Iter = 1
-	if verifyPassword(&weak, "long enough password") {
+	if check(&weak, "long enough password") {
 		t.Error("a stored hash with too few rounds was accepted")
+	}
+}
+
+// Hardening: with every hashing slot taken, a request gives up after slotWait (answered 503) instead of queueing
+// forever behind a flood.
+func TestHashingGivesUpWhenEverySlotIsTaken(t *testing.T) {
+	old := slotWait
+	slotWait = 50 * time.Millisecond
+	defer func() { slotWait = old }()
+	for i := 0; i < cap(hashSlots); i++ {
+		hashSlots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(hashSlots); i++ {
+			<-hashSlots
+		}
+	}()
+	done := make(chan error, 1)
+	go func() { _, err := hashPassword("long enough password"); done <- err }()
+	select {
+	case err := <-done:
+		if err != errBusy {
+			t.Fatalf("got %v, want errBusy", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hashing waited for a slot with no time limit")
+	}
+	if _, err := verifyPassword(dummy, "x"); err != errBusy {
+		t.Fatalf("verify: got %v, want errBusy", err)
 	}
 }
 
 func TestOwnerFile(t *testing.T) {
 	dir := t.TempDir()
-	if r := ownerLogin(dir, "a@b.co", "whatever password"); r != "setup" {
+	login := func(email, pw string) string {
+		r, _, err := ownerLogin(dir, email, pw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if r := login("a@b.co", "whatever password"); r != "setup" {
 		t.Errorf("no owner: %q", r)
 	}
 	if err := setOwner(dir, "a@b.co", "short"); err == nil {
@@ -193,9 +233,136 @@ func TestOwnerFile(t *testing.T) {
 	if fi, _ := os.Stat(filepath.Join(dir, "admin.json")); fi.Mode().Perm() != 0o600 {
 		t.Errorf("admin.json mode %v", fi.Mode().Perm())
 	}
-	if ownerLogin(dir, " me@example.com ", "long enough password") != "ok" || ownerLogin(dir, "me@example.com", "wrong password!!") != "" || ownerLogin(dir, "x@example.com", "long enough password") != "" {
+	if login(" me@example.com ", "long enough password") != "ok" || login("me@example.com", "wrong password!!") != "" || login("x@example.com", "long enough password") != "" {
 		t.Error("owner login gave the wrong answer")
 	}
+}
+
+// Hardening: replacing the owner password ends owner sessions made with the old one.
+func TestOwnerSessionEndsWhenThePasswordIsReplaced(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(dir)
+	a := NewAPI(st, dir)
+	if err := setOwner(dir, "me@example.com", "long enough password"); err != nil {
+		t.Fatal(err)
+	}
+	res := a.routes["POST /api/admin/login"](B{"email": "me@example.com", "password": "long enough password"}, nil)
+	if res.Status != 200 {
+		t.Fatalf("login %d", res.Status)
+	}
+	s := *res.Change.Login
+	if a.routes["GET /api/admin/data"](B{}, &s).Status != 200 {
+		t.Fatal("fresh owner session refused")
+	}
+	if err := setOwner(dir, "me@example.com", "another long password"); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.routes["GET /api/admin/data"](B{}, &s).Status; got != 401 {
+		t.Fatalf("old owner session after a new password: %d, want 401", got)
+	}
+	if got := a.routes["GET /api/admin/data"](B{}, &Session{Role: "owner"}).Status; got != 401 {
+		t.Fatalf("owner session with no version: %d, want 401", got)
+	}
+}
+
+// Hardening: IPv6 visitors share a limit per /64, so rotating addresses inside one block doesn't reset it.
+func TestIPKeyGroupsIPv6By64(t *testing.T) {
+	if ipKey("2001:db8:1:2::1") != ipKey("2001:db8:1:2:ffff:ffff:ffff:fffe") {
+		t.Error("two addresses in one /64 got different keys")
+	}
+	if ipKey("2001:db8:1:2::1") == ipKey("2001:db8:1:3::1") {
+		t.Error("two /64s share a key")
+	}
+	if ipKey("203.0.113.9") != "203.0.113.9" || ipKey("::ffff:203.0.113.9") != "203.0.113.9" {
+		t.Error("IPv4 keys changed")
+	}
+}
+
+// Hardening: on Azure App Service the server won't start without TRUST_PROXY=1.
+func TestRefusesAzureWithoutTrustProxy(t *testing.T) {
+	if proxyProblem("codemarcer-1", "") == "" || proxyProblem("codemarcer-1", "0") == "" {
+		t.Error("started on App Service without TRUST_PROXY=1")
+	}
+	if proxyProblem("codemarcer-1", "1") != "" || proxyProblem("", "") != "" {
+		t.Error("refused a correct setup")
+	}
+}
+
+// Hardening: invisible characters can't be used to make one name look like another.
+func TestInvisibleCharacters(t *testing.T) {
+	line, text := strOf(1, 80, false), strOf(1, 1000, true)
+	for _, bad := range []string{"Ann\u200bLee", "Ann\u200eLee", "\ufeffAnn", "Ann\u2028Lee", "Ann\u0085Lee", "Ann\u2066Lee"} {
+		if _, ok := line(bad); ok {
+			t.Errorf("single-line field accepted %q", bad)
+		}
+	}
+	for _, bad := range []string{"line one\u2028line two", "x\u202ey"} {
+		if _, ok := text(bad); ok {
+			t.Errorf("multi-line field accepted %q", bad)
+		}
+	}
+	if _, ok := text("I build apps 👩\u200d💻\nand fix them"); !ok {
+		t.Error("multi-line field refused an emoji with a zero-width joiner")
+	}
+	if _, ok := line("José Núñez"); !ok {
+		t.Error("refused an accented name")
+	}
+}
+
+// Hardening: replies are encoded after the store lock is released, so they must be copies. Run with -race.
+func TestConcurrentRequestsDontRace(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(dir)
+	sv := &server{api: NewAPI(st, dir), static: map[string][]byte{}, hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
+	n := 0
+	do := func(m, p, body, c string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(m, p, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		sv.mu.Lock()
+		n++
+		r.RemoteAddr = fmt.Sprintf("10.0.%d.%d:1", n/250, n%250) // a new address each time, so no limit is hit
+		sv.mu.Unlock()
+		if c != "" {
+			r.Header.Set("Cookie", c)
+		}
+		w := httptest.NewRecorder()
+		sv.ServeHTTP(w, r)
+		return w
+	}
+	w := do("POST", "/api/engineers", `{"name":"A","email":"a@b.co","password":"pppppppppppp","headline":"hello there","skills":"go","rate":50,"payWith":"cash","terms":"Upfront","available":true}`, "")
+	c := strings.Split(w.Header().Get("Set-Cookie"), ";")[0]
+	var id string
+	for k := range st.engineers {
+		id = k
+	}
+	for i := 0; i < 20; i++ {
+		do("POST", "/api/jobs", `{"engineerId":"`+id+`","choice":"hourly","hours":2,"clientName":"C","clientEmail":"c@d.co","clientPhone":"5551234567","details":"0123456789ab"}`, "")
+	}
+	jobs := []string{}
+	for k := range st.jobs {
+		jobs = append(jobs, k)
+	}
+	if len(jobs) != 20 {
+		t.Fatalf("%d jobs", len(jobs))
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(5)
+		go func() { defer wg.Done(); do("GET", "/api/me", "", c) }()
+		go func() { defer wg.Done(); do("GET", "/api/engineers", "", "") }()
+		go func() { defer wg.Done(); do("GET", "/api/engineers", "", "") }()
+		go func(i int) {
+			defer wg.Done()
+			do("POST", "/api/me/jobs", `{"id":"`+jobs[i]+`","status":"accepted"}`, c)
+		}(i)
+		go func(i int) { // the same job from another request, so a reply can be written while the job changes
+			defer wg.Done()
+			for k := 0; k < 20; k++ {
+				do("POST", "/api/me/jobs", `{"id":"`+jobs[i]+`","status":"paid"}`, c)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestStoreRollsBackWhenTheWriteFails(t *testing.T) {
