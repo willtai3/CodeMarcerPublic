@@ -18,7 +18,7 @@ $('#amount').addEventListener('input', calc); calc();
 const MSG = {
   rate: 'Too many attempts from this connection. Try again later.', request: 'That request was refused. Reload the page and try again.',
   pricing: 'Add an hourly rate or at least one package.', 'email-taken': 'That email is already listed. Sign in instead.',
-  password: 'Use a password of 10 to 200 characters.', auth: 'Wrong email or password.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
+  password: 'Use a password of 10 to 200 characters.', currentPassword: 'Your current password is wrong.', busy: 'The server is busy. Try again in a moment.', auth: 'Wrong email or password.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
 };
 const labelOf = el => el?.closest('label')?.firstChild.textContent.split(/,| \(/)[0].trim().toLowerCase().replace(/^your /, '');
 const fail = (form, err) => {
@@ -100,9 +100,8 @@ const openHire = (e, choice, slot) => {
     const r = await api('/api/jobs', { ...fields(form), engineerId: e.id, choice });
     slot.replaceChildren(h('div', { className: 'done', role: 'status' },
       h('p', {}, h('strong', { textContent: sentence(`Request sent to ${r.engineer.name}`) }), ` Quote ${usd(r.quote)}.`),
-      h('p', {}, 'Email them to agree the details: ', h('strong', { className: 'select', textContent: r.engineer.email })),
-      h('p', { textContent: `They take payment by ${r.engineer.payWith}. Payment terms: ${r.engineer.terms.toLowerCase()}.` }),
-      h('p', { className: 'meta', textContent: `They have your email and phone and will contact you. Pay the engineer directly. CodeMarcer never holds the money; agree the scope in writing before paying.` })));
+      h('p', { textContent: `They have your email and phone and will contact you to agree the details and how to pay. Payment terms: ${r.engineer.terms.toLowerCase()}.` }),
+      h('p', { className: 'meta', textContent: `Pay the engineer directly. CodeMarcer never holds the money; agree the scope in writing before paying.` })));
   });
   slot.replaceChildren(form);
   form.elements[hourly ? 'hours' : 'clientName'].focus();
@@ -178,9 +177,9 @@ for (const form of $$('.signin')) onSubmit(form, async () => {
   await loadMe(); location.hash = 'engineers';
 });
 onSubmit(profile, async () => {
-  const isNew = role !== 'engineer', { newPassword, ...b } = fields(profile), body = { ...b, available: profile.elements.available.checked, packages: readPkgs(), ...(!isNew && { password: newPassword }) };
+  const isNew = role !== 'engineer', { newPassword, currentPassword, ...b } = fields(profile), body = { ...b, available: profile.elements.available.checked, packages: readPkgs(), ...(!isNew && { password: newPassword, currentPassword }) };
   await api(isNew ? '/api/engineers' : '/api/me', body);
-  profile.elements.newPassword.value = ''; profile.elements.password.value = '';
+  profile.elements.newPassword.value = profile.elements.currentPassword.value = profile.elements.password.value = '';
   await loadMe(); await loadList();
   $('.msg', profile).textContent = ''; $('#who').textContent += isNew ? " You're listed." : ' Profile saved.';
   $('#who').scrollIntoView({ block: 'nearest' });

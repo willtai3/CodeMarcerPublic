@@ -65,7 +65,7 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
     { label: 'Engineer', always: true, cell: e => contactCell(e, h('p', { className: 'meta', textContent: e.headline })) },
     { label: 'Listing', always: true, cell: e => h('span', { className: 'inline' }, e.hidden ? 'Hidden' : e.available ? 'Live' : 'Live, not taking work', small(e.hidden ? 'Show' : 'Hide', act('/api/admin/hide', { id: e.id, hidden: !e.hidden }, `${e.name} is now ${e.hidden ? 'shown' : 'hidden'} on the site.`))) },
     { label: 'Skills', on: true, cell: e => e.skills.join(', ') },
-    { label: 'Pricing', cell: e => [e.rate ? `${usd(e.rate)}/hour` : 'No hourly rate', h('br'), plural(e.packages.length, 'package'), h('p', { className: 'meta', textContent: `Paid by ${e.payWith}` })] },
+    { label: 'Pricing', cell: e => [e.rate ? `${usd(e.rate)}/hour` : 'No hourly rate', h('br'), plural(e.packages.length, 'package'), e.payWith && h('p', { className: 'meta', textContent: `Paid by ${e.payWith}` })] },
     { label: 'Jobs', cell: e => String(e.jobs) },
     { label: 'Portfolio', cell: e => e.portfolio ? a(e.portfolio, 'Portfolio') : '' },
     { label: 'Joined', cell: e => date(e.created) },
@@ -118,7 +118,7 @@ $('#login').addEventListener('submit', async e => {
   e.preventDefault();
   const msg = $('.msg', e.target), f = e.target.elements;
   try { await api('/api/admin/login', { email: f.email.value, password: f.password.value }); e.target.reset(); msg.textContent = ''; await load(); signedIn(); }
-  catch (err) { msg.className = 'msg error'; msg.textContent = err.status === 429 ? 'Too many attempts. Wait 15 minutes.' : err.status === 401 ? 'Wrong email or password.' : err.status === 503 ? 'No owner account yet. Run npm run admin on the server first.' : "Couldn't reach the server."; }
+  catch (err) { msg.className = 'msg error'; msg.textContent = err.status === 429 ? 'Too many attempts. Wait 15 minutes.' : err.status === 401 ? 'Wrong email or password.' : err.message === 'setup' ? 'No owner account yet. Run npm run admin on the server first.' : err.status === 503 ? 'The server is busy. Try again in a moment.' : "Couldn't reach the server."; }
 });
 $('#logout').addEventListener('click', async () => { await api('/api/admin/logout', {}).catch(() => {}); signedOut(); });
 const showTab = tabs($('#app .tabs'));

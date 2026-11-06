@@ -65,7 +65,7 @@ test('requests: JSON only, size cap, bad JSON, other sites refused', async () =>
   assert.equal((await post(base, '/api/engineers', ENGINEER, { Origin: 'https://evil.example' })).status, 403, 'cross-site POST refused');
 });
 
-let maya, mayaC;
+let maya, mayaC, mayaFresh;
 test('engineer lists themselves and is live at once; public profile hides private fields', async () => {
   const r = await post(base, '/api/engineers', ENGINEER);
   assert.equal(r.status, 201);
@@ -79,7 +79,7 @@ test('engineer lists themselves and is live at once; public profile hides privat
   assert.deepEqual(race.map(x => x.status).sort(), [201, 409], 'concurrent sign-ups with one email');
 });
 
-test('hiring needs no account: name, email, phone and a description; contact and payment shown back', async () => {
+test('hiring needs no account: name, email, phone and a description; only the name and terms shown back', async () => {
   for (const [patch, field] of [[{ choice: 'p3' }, 'choice'], [{ choice: 'hourly', hours: '0' }, 'hours'], [{ clientName: '' }, 'clientName'], [{ clientEmail: 'nope' }, 'clientEmail'], [{ clientPhone: '' }, 'clientPhone'], [{ clientPhone: '12345' }, 'clientPhone'], [{ clientPhone: 'call me maybe' }, 'clientPhone'], [{ details: 'short' }, 'details'], [{ link: 'http://insecure.example' }, 'link'], [{ clientName: 'Ann‮evil' }, 'clientName']])
     assert.deepEqual(await json(await hire(maya.id, patch)), { error: field }, JSON.stringify(patch));
   assert.equal((await hire('missing')).status, 404);
@@ -87,7 +87,8 @@ test('hiring needs no account: name, email, phone and a description; contact and
   const r = await hire(maya.id);
   assert.equal(r.status, 201);
   assert.equal(r.headers.get('set-cookie'), null, 'no account or session for clients');
-  assert.deepEqual(await json(r), { engineer: { name: 'Maya R.', email: 'maya@example.com', payWith: 'Venmo @maya-r', terms: 'Half upfront, half on completion' }, quote: 400 });
+  // Hardening: anyone can send a request, so the reply carries no engineer email or payment handle.
+  assert.deepEqual(await json(r), { engineer: { name: 'Maya R.', terms: 'Half upfront, half on completion' }, quote: 400 });
   assert.equal((await hire(maya.id, { choice: 'hourly', hours: '3', clientPhone: '+1 555 987 6543' })).status, 201, 'same client again, no sign-in needed');
 });
 
@@ -114,16 +115,27 @@ test('job flow: engineer sees the client contact, accepts → paid → complete 
 });
 
 test('profile edits: password optional, email and hidden fixed; sign out ends the session', async () => {
-  assert.equal((await post(base, '/api/me', { ...ENGINEER, password: 'short' }, as(mayaC))).status, 400);
+  assert.equal((await post(base, '/api/me', { ...ENGINEER, password: 'short', currentPassword: ENGINEER.password }, as(mayaC))).status, 400);
   assert.equal((await post(base, '/api/me', { ...ENGINEER, headline: 'New headline here', password: '', email: 'hijack@example.com', hidden: true, id: 'x' }, as(mayaC))).status, 200);
   const d = await json(await get('/api/me', mayaC));
   assert.deepEqual([d.profile.headline, d.profile.email, d.profile.hidden], ['New headline here', 'maya@example.com', false]);
-  assert.equal((await post(base, '/api/me', { ...ENGINEER, password: 'brand new password' }, as(mayaC))).status, 200);
+  // Hardening: a new password needs the current one, and ends every other session.
+  const laptop = cookieOf(await post(base, '/api/login', { email: 'maya@example.com', password: ENGINEER.password }));
+  assert.equal((await get('/api/me', laptop)).status, 200);
+  for (const currentPassword of [undefined, '', 'not my password'])
+    assert.deepEqual(await json(await post(base, '/api/me', { ...ENGINEER, password: 'brand new password', currentPassword }, as(mayaC))), { error: 'currentPassword' });
+  const changed = await post(base, '/api/me', { ...ENGINEER, password: 'brand new password', currentPassword: ENGINEER.password }, as(mayaC));
+  assert.equal(changed.status, 200);
+  assert.equal((await get('/api/me', laptop)).status, 401, 'the other session ended');
+  assert.equal((await get('/api/me', mayaC)).status, 401, 'the old cookie was replaced');
+  mayaC = cookieOf(changed);
+  assert.equal((await get('/api/me', mayaC)).status, 200, 'this browser stays signed in');
   assert.equal((await post(base, '/api/login', { email: 'maya@example.com', password: ENGINEER.password })).status, 401, 'old password stops working');
-  assert.deepEqual(await json(await post(base, '/api/login', { email: ' MAYA@example.com ', password: 'brand new password' })), { role: 'engineer' });
+  const fresh = await post(base, '/api/login', { email: ' MAYA@example.com ', password: 'brand new password' });
+  assert.deepEqual(await json(fresh), { role: 'engineer' });
+  mayaFresh = cookieOf(fresh);
   await post(base, '/api/logout', {}, as(mayaC));
   assert.equal((await get('/api/me', mayaC)).status, 401);
-  assert.equal((await post(base, '/api/login', { email: 'nobody@example.com', password: 'whatever password' })).status, 401);
 });
 
 test('staff roles: owner manages the team; admin sees money but not the team; moderator only hides; changes apply at once', async () => {
@@ -147,7 +159,10 @@ test('staff roles: owner manages the team; admin sees money but not the team; mo
 
   d = await json(await get('/api/admin/data', moC));
   assert.deepEqual([d.me.role, 'clients' in d, 'jobs' in d, 'totals' in d, 'staff' in d], ['moderator', false, false, false, false]);
-  assert.equal((await post(base, '/api/admin/hide', { id: maya.id, hidden: true }, as(moC))).status, 200);
+  // Hardening: moderators only hide and show listings, so they don't get engineers' emails or payment handles.
+  assert.deepEqual([...new Set(d.engineers.flatMap(e => [e.email, e.payWith]))], ['']);
+  const hid = await post(base, '/api/admin/hide', { id: maya.id, hidden: true }, as(moC));
+  assert.deepEqual([hid.status, await json(hid)], [200, { ok: true }]);
   assert.ok(!(await json(await get('/api/engineers'))).some(e => e.id === maya.id));
   assert.equal((await hire(maya.id)).status, 404, 'hidden engineers can not be hired');
   assert.equal((await post(base, '/api/admin/hide', { id: maya.id, hidden: false }, as(moC))).status, 200);
@@ -156,9 +171,13 @@ test('staff roles: owner manages the team; admin sees money but not the team; mo
 
   d = await json(await get('/api/admin/data', alC));
   assert.deepEqual([d.me.role, 'clients' in d, 'jobs' in d, 'staff' in d], ['admin', true, true, false]);
+  assert.equal(d.engineers.find(e => e.id === maya.id).email, 'maya@example.com', 'admins see contact details');
   assert.equal((await add({ email: 'y@example.com' }, alC)).status, 403, 'admins can not manage the team');
   assert.equal((await post(base, '/api/admin/password', { id: maya.id, password: 'short' }, as(alC))).status, 400);
+  const before = mayaFresh;
+  assert.equal((await get('/api/me', before)).status, 200);
   assert.equal((await post(base, '/api/admin/password', { id: maya.id, password: 'temporary pass 1' }, as(alC))).status, 200);
+  assert.equal((await get('/api/me', before)).status, 401, 'Hardening: a reset signs the engineer out everywhere');
   const tempLogin = await post(base, '/api/login', { email: 'maya@example.com', password: 'temporary pass 1' }), engC = cookieOf(tempLogin);
   assert.equal(tempLogin.status, 200, 'temporary password works');
 
@@ -203,7 +222,8 @@ test('rate limits: 10 accepted listings/requests per hour (rejected ones free), 
     for (let i = 0; i < 15; i++) assert.equal((await post(s.base, '/api/engineers', { ...ENGINEER, email: 'bad' })).status, 400);
     for (let i = 0; i < 10; i++) assert.equal((await post(s.base, '/api/engineers', { ...ENGINEER, email: `e${i}@x.co` })).status, 201);
     assert.equal((await post(s.base, '/api/engineers', { ...ENGINEER, email: 'e11@x.co' })).status, 429);
-    for (let i = 0; i < 10; i++) await post(s.base, '/api/login', { email: 'e1@x.co', password: 'wrong password!' });
+    assert.equal((await post(s.base, '/api/login', { email: 'nobody@example.com', password: 'whatever password' })).status, 401);
+    for (let i = 0; i < 9; i++) await post(s.base, '/api/login', { email: 'e1@x.co', password: 'wrong password!' });
     assert.equal((await post(s.base, '/api/login', { email: 'e1@x.co', password: ENGINEER.password })).status, 429);
     assert.equal((await post(s.base, '/api/admin/login', ADMIN)).status, 429, 'shared sign-in bucket');
   } finally { await s.stop(); }
@@ -217,4 +237,41 @@ test('behind the proxy, rate limits use the address the proxy added, not one the
     assert.equal((await post(s.base, '/api/login', { email: 'a@x.co', password: 'wrong password!' }, { 'X-Forwarded-For': '10.9.9.9, 203.0.113.7' })).status, 429);
     assert.equal((await post(s.base, '/api/login', { email: 'a@x.co', password: 'wrong password!' }, { 'X-Forwarded-For': '203.0.113.8' })).status, 401, 'a different real address has its own limit');
   } finally { await s.stop(); }
+});
+
+// Hardening: a request takes its place in the limit before it runs, so parallel requests can't all get in.
+test('rate limits hold under a burst: 30 hire requests at once, 10 accepted', async () => {
+  const s = await start();
+  try {
+    const e = cookieOf(await post(s.base, '/api/engineers', ENGINEER)) && (await (await fetch(s.base + '/api/engineers')).json())[0];
+    const burst = await Promise.all(Array.from({ length: 30 }, () => post(s.base, '/api/jobs', { engineerId: e.id, choice: 'p0', details: 'Login breaks after deploy.', ...CLIENT })));
+    const codes = burst.map(r => r.status);
+    assert.deepEqual([codes.filter(c => c === 201).length + 1, codes.filter(c => c === 429).length], [10, 21], codes.join(','));
+  } finally { await s.stop(); }
+});
+
+// Hardening: every sign-up and password change hashes a password (slow on purpose), so they have their own limit even
+// when the answer is "email taken" or "wrong current password".
+test('password hashing is limited: 20 sign-up attempts and 20 password changes per hour', async () => {
+  const s = await start();
+  try {
+    const c = cookieOf(await post(s.base, '/api/engineers', ENGINEER));
+    for (let i = 0; i < 19; i++) assert.equal((await post(s.base, '/api/engineers', ENGINEER)).status, 409);
+    assert.equal((await post(s.base, '/api/engineers', { ...ENGINEER, email: 'new@x.co' })).status, 429);
+    assert.equal((await post(s.base, '/api/me', { ...ENGINEER, password: '' }, as(c))).status, 200, 'a profile save without a new password is not limited');
+    const s2 = await start();
+    try {
+      const c2 = cookieOf(await post(s2.base, '/api/engineers', ENGINEER));
+      for (let i = 0; i < 19; i++) assert.equal((await post(s2.base, '/api/me', { ...ENGINEER, password: 'another password', currentPassword: 'wrong guess!!' }, as(c2))).status, 403);
+      assert.equal((await post(s2.base, '/api/me', { ...ENGINEER, password: 'another password', currentPassword: ENGINEER.password }, as(c2))).status, 429);
+    } finally { await s2.stop(); }
+  } finally { await s.stop(); }
+});
+
+// Hardening: on Azure App Service every request comes from the platform proxy; without TRUST_PROXY=1 everyone would
+// share one rate limit, so the server refuses to start.
+test('refuses to start on App Service without TRUST_PROXY=1', async () => {
+  await assert.rejects(start({ WEBSITE_SITE_NAME: 'codemarcer-test', TRUST_PROXY: '' }), /TRUST_PROXY=1/);
+  const s = await start({ WEBSITE_SITE_NAME: 'codemarcer-test', TRUST_PROXY: '1' });
+  await s.stop();
 });

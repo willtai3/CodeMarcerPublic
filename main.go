@@ -49,19 +49,33 @@ var security = map[string]string{
 
 const maxBody = 32 << 10
 
-// Rate limits: new listings and hire requests count only when accepted; sign-ins count every attempt.
+// Rate limits, per connection (an IPv4 address, or an IPv6 /64). A request takes its place in each of its route's
+// buckets before it runs, so a burst of parallel requests can't all slip under the limit; afterwards the place is given
+// back if keep says that answer doesn't count.
+//   - "s": new listings and hire requests, counted only when accepted.
+//   - "h": anything that hashes a new password (sign-up, a password change), counted unless refused before hashing.
+//   - "l": sign-ins, every attempt.
 type limit struct {
-	bucket       string
-	max          int
-	per          time.Duration
-	acceptedOnly bool
+	bucket string
+	max    int
+	per    time.Duration
+	keep   func(status int) bool
+	when   func(b B) bool // nil: every request on the route
 }
 
-var limits = map[string]limit{
-	"POST /api/engineers":   {"s", 10, time.Hour, true},
-	"POST /api/jobs":        {"s", 10, time.Hour, true},
-	"POST /api/login":       {"l", 10, 15 * time.Minute, false},
-	"POST /api/admin/login": {"l", 10, 15 * time.Minute, false},
+var (
+	always   = func(int) bool { return true }
+	accepted = func(code int) bool { return code < 300 }
+	hashed   = func(code int) bool { return code != 400 && code != 401 } // 400 and 401 are answered before any hashing
+	newPass  = func(b B) bool { pw, _ := b["password"].(string); return pw != "" }
+)
+
+var limits = map[string][]limit{
+	"POST /api/engineers":   {{"s", 10, time.Hour, accepted, nil}, {"h", 20, time.Hour, hashed, nil}},
+	"POST /api/jobs":        {{"s", 10, time.Hour, accepted, nil}},
+	"POST /api/me":          {{"h", 20, time.Hour, hashed, newPass}},
+	"POST /api/login":       {{"l", 10, 15 * time.Minute, always, nil}},
+	"POST /api/admin/login": {{"l", 10, 15 * time.Minute, always, nil}},
 }
 
 type server struct {
@@ -125,6 +139,19 @@ func (sv *server) clientIP(r *http.Request) string {
 		return host
 	}
 	return addr
+}
+
+// ipKey groups IPv6 addresses by their /64, the block one customer usually gets, so cycling through addresses inside
+// it doesn't reset the limits.
+func ipKey(ip string) string {
+	p := net.ParseIP(ip)
+	switch {
+	case p == nil:
+		return ip
+	case p.To4() != nil:
+		return p.To4().String()
+	}
+	return p.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 func (sv *server) recent(key string, per time.Duration) []time.Time {
@@ -223,38 +250,57 @@ func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	lim, limited := limits[route]
-	key := lim.bucket + sv.clientIP(r)
-	if limited {
-		sv.mu.Lock()
-		seen := sv.recent(key, lim.per)
-		if len(seen) >= lim.max {
+	// Check every bucket and take a place in each, all under one lock.
+	ip, now := ipKey(sv.clientIP(r)), time.Now()
+	held, trap := []limit{}, false
+	for _, l := range limits[route] {
+		if l.when == nil || l.when(b) {
+			held, trap = append(held, l), trap || l.bucket == "s"
+		}
+	}
+	sv.mu.Lock()
+	for _, l := range held {
+		if len(sv.recent(l.bucket+ip, l.per)) >= l.max {
 			sv.mu.Unlock()
 			send(w, 429, map[string]string{"error": "rate"})
 			return
 		}
-		if !lim.acceptedOnly {
-			sv.hits[key] = append(seen, time.Now())
-		}
-		sv.mu.Unlock()
-		if web, _ := b["website"].(string); lim.acceptedOnly && web != "" { // honeypot: bots fill the hidden field
-			sv.mu.Lock()
-			sv.hits[key] = append(sv.hits[key], time.Now())
-			sv.mu.Unlock()
-			send(w, 201, map[string]bool{"ok": true})
-			return
-		}
+	}
+	for _, l := range held {
+		sv.hits[l.bucket+ip] = append(sv.hits[l.bucket+ip], now)
+	}
+	sv.mu.Unlock()
+	if web, _ := b["website"].(string); trap && web != "" { // honeypot: bots fill the hidden field; it keeps its place
+		send(w, 201, map[string]bool{"ok": true})
+		return
 	}
 	res := fn(b, sv.session(r))
-	if limited && lim.acceptedOnly && res.Status < 300 {
-		sv.mu.Lock()
-		sv.hits[key] = append(sv.hits[key], time.Now())
-		sv.mu.Unlock()
+	sv.mu.Lock()
+	for _, l := range held {
+		if !l.keep(res.Status) { // give the place back
+			list := sv.hits[l.bucket+ip]
+			for i := range list {
+				if list[i].Equal(now) {
+					sv.hits[l.bucket+ip] = append(list[:i:i], list[i+1:]...)
+					break
+				}
+			}
+		}
 	}
+	sv.mu.Unlock()
 	if res.Change != nil {
 		w.Header().Set("Set-Cookie", sv.apply(r, res.Change))
 	}
 	send(w, res.Status, res.Body)
+}
+
+// proxyProblem: on Azure App Service (which sets WEBSITE_SITE_NAME) every request arrives from the platform's proxy,
+// so without TRUST_PROXY=1 all visitors would share one rate limit and one bad actor could lock everyone out.
+func proxyProblem(site, trust string) string {
+	if site != "" && trust != "1" {
+		return "Running on Azure App Service without TRUST_PROXY=1: every visitor would share one rate limit. Set TRUST_PROXY=1 in the app settings."
+	}
+	return ""
 }
 
 func env(k, fallback string) string {
@@ -272,6 +318,9 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+	if msg := proxyProblem(os.Getenv("WEBSITE_SITE_NAME"), os.Getenv("TRUST_PROXY")); msg != "" {
+		log.Fatal(msg)
 	}
 	st, err := OpenStore(dataDir)
 	if err != nil {

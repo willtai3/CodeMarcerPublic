@@ -17,7 +17,7 @@ Found a bug? Open an issue. Found a security problem? Report it privately, see [
 
 ## How it works
 
-- Clients don't need an account. To hire, they pick a package or hourly work and give their name, email, phone number and a description of the project. Only then are the engineer's email and payment details shown to them.
+- Clients don't need an account. To hire, they pick a package or hourly work and give their name, email, phone number and a description of the project. The engineer gets those details and contacts them; the engineer's own email and payment handle are never shown to visitors.
 - Engineers sign up with a headline, skills, an hourly rate and/or up to 5 fixed-price packages, how clients pay them (Venmo, Zelle, PayPal…) and when (upfront, half and half, on completion). Profiles go live at once; staff can hide one.
 - The client pays the engineer directly. CodeMarcer never holds money. The engineer contacts the client, accepts or declines, marks the job paid and complete, and enters the final amount.
 - Staff sign in at /admin. The owner (made with `codemarcer admin`) adds team members as **admin** (engineers, clients, jobs, setting temporary engineer passwords) or **moderator** (hiding and showing engineers only). Roles are checked on every request, so a change or removal applies immediately.
@@ -35,7 +35,7 @@ DATA_DIR=./data bin/codemarcer
 
 Open http://127.0.0.1:8080 for the site and http://127.0.0.1:8080/admin for the admin page.
 
-Settings (environment variables, all optional): PORT (8080), HOST (127.0.0.1), DATA_DIR (./data), TRUST_PROXY=1 when behind the host's HTTPS proxy (uses the proxy's address for rate limits and turns on the http→https redirect).
+Settings (environment variables, all optional): PORT (8080), HOST (127.0.0.1), DATA_DIR (./data), TRUST_PROXY=1 when behind the host's HTTPS proxy (uses the proxy's address for rate limits and turns on the http→https redirect). On Azure App Service the server refuses to start without it.
 
 ## Code map
 
@@ -51,10 +51,12 @@ Settings (environment variables, all optional): PORT (8080), HOST (127.0.0.1), D
 
 Standard web setup: HTTPS from the host (TLS in transit, HSTS, `__Host-` Secure HttpOnly SameSite=Strict session cookie, http redirected to https behind the proxy) and the host's disk encryption at rest. Data is stored as plain JSON in DATA_DIR with owner-only file permissions, so anyone with access to the server can read it.
 
-- Passwords are stored only as PBKDF2-HMAC-SHA256 hashes, 600,000 rounds with a random salt; sign-in takes the same time whether or not the email exists.
+- Passwords are stored only as PBKDF2-HMAC-SHA256 hashes, 600,000 rounds with a random salt; sign-in takes the same time whether or not the email exists. Hashing runs a few at a time; a request that can't get a turn within 2 seconds is answered "busy" instead of queueing.
+- Changing a password needs the current one. A change or a staff reset signs that account out everywhere else; replacing the owner password ends owner sessions.
 - POSTs must be JSON (32 KB max) and come from the site itself (cross-site Origin refused).
-- Every text field is length-checked; control characters and Unicode direction overrides are refused.
-- Sign-in is limited to 10 tries per 15 minutes per address, new listings and hire requests to 10 per hour, and sessions last 8 hours.
+- Every text field is length-checked; control characters, Unicode direction overrides and line separators are refused, and single-line fields (names, emails) also refuse invisible characters such as zero-width spaces.
+- Limits per address (IPv6 per /64): sign-in 10 tries per 15 minutes; new listings and hire requests 10 accepted per hour; sign-ups and password changes 20 tries per hour. A request takes its place before it runs, so parallel requests can't get around a limit. Sessions last 8 hours.
+- Moderators see listings without engineers' emails or payment handles.
 - CI runs `gofmt`, `go vet`, `govulncheck`, the race detector on the Go tests, and a gitleaks secret scan.
 
 Public surface: GET /, /admin (page shell only), /app.js, /admin.js, /ui.js, /fees.js, /styles.css, /favicon.svg, /api/engineers (public profiles only: no email or payment details), /api/pricing; POST /api/engineers, /api/login, /api/logout, /api/jobs, /api/admin/login, /api/admin/logout. Everything else needs a signed-in engineer or staff member with the right role. `test/api.test.js` fails if this list changes.

@@ -58,7 +58,10 @@
         <label>Email<input name="email" type="email" maxlength="120" autocomplete="email"></label>
         <label>Password, 10+ characters<input name="password" type="password" maxlength="200" autocomplete="new-password"></label>
       </div>
-      <label data-edit hidden>New password, leave blank to keep it (optional)<input name="newPassword" type="password" maxlength="200" autocomplete="new-password"></label>
+      <div class="row" data-edit hidden>
+        <label>New password, leave blank to keep it (optional)<input name="newPassword" type="password" maxlength="200" autocomplete="new-password"></label>
+        <label>Current password, needed to change it<input name="currentPassword" type="password" maxlength="200" autocomplete="current-password"></label>
+      </div>
       <label>Headline<input name="headline" required maxlength="80" placeholder="I take AI-built web apps to production"></label>
       <label>Skills, separated by commas<input name="skills" required list="stacks" placeholder="next.js, supabase, stripe, aws"></label>
       <label>Hourly rate in USD (optional if you offer packages)<input name="rate" inputmode="numeric" placeholder="120"></label>

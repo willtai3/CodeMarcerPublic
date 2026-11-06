@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -29,8 +30,10 @@ func validate(spec []check, b B) (map[string]any, string) {
 	return out, ""
 }
 
-// clean rejects control characters (newlines allowed only in multi-line fields) and the Unicode
-// bidirectional overrides that can make one name look like another.
+// clean rejects control characters (newlines allowed only in multi-line fields), the Unicode bidirectional overrides
+// that can make one name look like another, and the line and paragraph separators. Single-line fields (names, emails,
+// headlines) also refuse every invisible format character: zero-width spaces and joiners, direction marks, the BOM.
+// Multi-line text keeps those (emoji like 👩‍💻 are built with a zero-width joiner).
 func clean(s string, multiline bool) bool {
 	for _, r := range s {
 		switch {
@@ -38,7 +41,9 @@ func clean(s string, multiline bool) bool {
 			if !multiline {
 				return false
 			}
-		case r < 0x20 || r == 0x7f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		case r < 0x20 || r >= 0x7f && r < 0xa0, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, unicode.In(r, unicode.Zl, unicode.Zp):
+			return false
+		case !multiline && unicode.Is(unicode.Cf, r):
 			return false
 		}
 	}
@@ -196,9 +201,6 @@ var terms = []string{"Upfront", "Half upfront, half on completion", "On completi
 
 var profileSpec = []check{{"name", strOf(1, 80, false)}, {"headline", strOf(5, 80, false)}, {"skills", skillsOf}, {"rate", opt(intOf(10, 1000))}, {"packages", packagesOf}, {"payWith", strOf(3, 200, false)}, {"terms", oneOf(terms...)}, {"portfolio", opt(linkOf)}, {"about", opt(strOf(1, 1000, true))}, {"available", boolOf}}
 var signupSpec = append([]check{profileSpec[0], {"email", emailOf}, {"password", passwordOf}}, profileSpec[1:]...)
-var jobSpec = []check{{"details", strOf(10, 2000, true)}, {"link", opt(linkOf)}}
-var clientSpec = []check{{"clientName", strOf(1, 80, false)}, {"clientEmail", emailOf}, {"password", passwordOf}}
-var clientEditSpec = []check{{"name", strOf(1, 80, false)}}
 var staffSpec = []check{{"name", strOf(1, 80, false)}, {"email", emailOf}, {"password", passwordOf}, {"role", oneOf("admin", "moderator")}}
 
 // What each staff role may do. The owner is the account made with `codemarcer admin`.
@@ -213,9 +215,8 @@ func can(role, perm string) bool {
 	return false
 }
 
-// Jobs move forward only: the engineer accepts or declines, then marks paid and complete; the client can cancel before it's accepted.
+// Jobs move forward only: the engineer accepts or declines, then marks paid and complete.
 var next = map[string][]string{"requested": {"accepted", "declined"}, "accepted": {"paid", "complete", "declined"}, "paid": {"complete"}}
-var clientNext = map[string][]string{"requested": {"cancelled"}}
 
 func allowed(table map[string][]string, from, to string) bool {
 	for _, s := range table[from] {

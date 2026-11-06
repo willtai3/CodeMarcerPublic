@@ -3,7 +3,7 @@
 ## Get it running (about 2 minutes)
 
 1. Install Go 1.24 or newer, and Node 20 or newer (Node is only for the browser tests).
-2. `npm install` (installs Playwright; the server itself has no third-party dependencies).
+2. `npm ci` (installs the pinned Playwright; the server itself has no third-party dependencies).
 3. `npx playwright install chromium`
 4. `npm test` — builds `bin/codemarcer`, runs the Go tests, then the API, browser and scale tests. All should pass before you change anything.
 5. `DATA_DIR=./data bin/codemarcer admin` to create a local owner login, then `DATA_DIR=./data bin/codemarcer` and open http://127.0.0.1:8080 and /admin.

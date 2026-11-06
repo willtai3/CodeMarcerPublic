@@ -42,6 +42,7 @@ type Engineer struct {
 	Available bool      `json:"available"`
 	Hidden    bool      `json:"hidden"`
 	Auth      *Hash     `json:"auth,omitempty"`
+	AuthVer   int       `json:"authVer,omitempty"` // goes up on each password change or reset; older sessions stop working
 }
 
 type Staff struct {
@@ -158,7 +159,16 @@ func atomicWrite(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// Sync the folder too, so the rename itself survives a power cut.
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		err = d.Sync()
+		d.Close()
+		return err
+	}
+	return nil
 }
 
 // commit writes the current state. If the write fails, undo puts memory back as it was (fail closed).

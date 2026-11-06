@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,6 +19,7 @@ import (
 type Session struct {
 	Role string    // "engineer", "owner" or "staff"
 	ID   string    // engineer or staff id
+	Ver  string    // the password version it was made with; a password change or reset ends older sessions
 	Exp  time.Time // set by the server
 }
 
@@ -38,6 +41,7 @@ type API struct {
 	now     func() time.Time
 	dataDir string
 	routes  map[string]handler
+	pubMu   sync.Mutex // guards public: many readers of the store can ask for the directory at once
 	public  struct {
 		version int
 		list    []publicProfile
@@ -52,7 +56,10 @@ func fail(code int, e string) Result {
 var (
 	denied = fail(401, "auth")
 	gone   = fail(404, "not found")
+	busy   = fail(503, "busy") // every password-hashing slot stayed taken; try again shortly
 )
+
+func engVer(e *Engineer) string { return strconv.Itoa(e.AuthVer) }
 
 func newID() string {
 	b := make([]byte, 16)
@@ -73,13 +80,15 @@ func (a *API) role(s *Session) string {
 	case s == nil:
 		return ""
 	case s.Role == "owner":
-		return "owner"
+		if s.Ver != "" && s.Ver == ownerVersion(a.dataDir) {
+			return "owner"
+		}
 	case s.Role == "staff":
 		if x := a.st.staff[s.ID]; x != nil && !x.Removed {
 			return x.Role
 		}
 	case s.Role == "engineer":
-		if a.st.engineers[s.ID] != nil {
+		if e := a.st.engineers[s.ID]; e != nil && engVer(e) == s.Ver {
 			return "engineer"
 		}
 	}
@@ -102,7 +111,7 @@ type publicProfile struct {
 	Created   string    `json:"created"`
 }
 
-func private(e *Engineer) Engineer { c := *e; c.Auth = nil; return c }
+func private(e *Engineer) Engineer { c := *e; c.Auth, c.AuthVer = nil, 0; return c }
 func privateStaff(x *Staff) Staff  { c := *x; c.Auth = nil; return c }
 
 func newestFirst[T any](list []T, created func(T) string) []T {
@@ -113,6 +122,8 @@ func newestFirst[T any](list []T, created func(T) string) []T {
 // directory is the public list: hidden engineers left out, available ones first, newest first.
 // It is rebuilt only when the store changes. Call with st.mu held for reading.
 func (a *API) directory() []publicProfile {
+	a.pubMu.Lock()
+	defer a.pubMu.Unlock()
 	if a.public.list != nil && a.public.version == a.st.version {
 		return a.public.list
 	}
@@ -167,7 +178,11 @@ func NewAPI(st *Store, dataDir string) *API {
 			if bad != "" {
 				return fail(400, bad)
 			}
-			e.Auth = hashPassword(pw)
+			h, err := hashPassword(pw)
+			if err != nil {
+				return busy
+			}
+			e.Auth = h
 			st.mu.Lock()
 			defer st.mu.Unlock()
 			if st.byEmail[e.Email] != nil {
@@ -177,7 +192,7 @@ func NewAPI(st *Store, dataDir string) *API {
 			if err := st.addEngineer(e); err != nil {
 				return fail(500, "server")
 			}
-			return Result{201, map[string]string{"role": "engineer"}, &Change{Login: &Session{Role: "engineer", ID: e.ID}}}
+			return Result{201, map[string]string{"role": "engineer"}, &Change{Login: &Session{Role: "engineer", ID: e.ID, Ver: engVer(e)}}}
 		},
 		"POST /api/login": func(b B, s *Session) Result {
 			email, _ := b["email"].(string)
@@ -185,14 +200,19 @@ func NewAPI(st *Store, dataDir string) *API {
 			st.mu.RLock()
 			e := st.byEmail[strings.ToLower(strings.TrimSpace(email))]
 			var h *Hash
+			var id, ver string
 			if e != nil {
-				h = e.Auth
+				h, id, ver = e.Auth, e.ID, engVer(e) // the session keeps the version that went with this hash
 			}
 			st.mu.RUnlock()
-			if !verifyPassword(h, pw) || e == nil {
+			good, err := verifyPassword(h, pw)
+			if err != nil {
+				return busy
+			}
+			if !good || e == nil {
 				return denied
 			}
-			return Result{200, map[string]string{"role": "engineer"}, &Change{Login: &Session{Role: "engineer", ID: e.ID}}}
+			return Result{200, map[string]string{"role": "engineer"}, &Change{Login: &Session{Role: "engineer", ID: id, Ver: ver}}}
 		},
 		"POST /api/logout": func(b B, s *Session) Result { return Result{200, map[string]bool{"ok": true}, &Change{Logout: true}} },
 
@@ -220,7 +240,9 @@ func NewAPI(st *Store, dataDir string) *API {
 			if err := st.addJob(j); err != nil {
 				return fail(500, "server")
 			}
-			return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "email": e.Email, "payWith": e.PayWith, "terms": e.Terms}, "quote": c.Quote}, nil}
+			// Only what the confirmation shows. The engineer has the client's contact details and gets in touch; their own
+			// email and payment handle are not handed to anyone who sends a request.
+			return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "terms": e.Terms}, "quote": c.Quote}, nil}
 		},
 
 		"GET /api/me": func(b B, s *Session) Result {
@@ -229,17 +251,21 @@ func NewAPI(st *Store, dataDir string) *API {
 			if a.role(s) != "engineer" {
 				return denied
 			}
-			jobs := []*Job{}
+			jobs := []Job{} // copies: the reply is written after the lock is released
 			for _, j := range st.jobs {
 				if j.EngineerID == s.ID {
-					jobs = append(jobs, j)
+					jobs = append(jobs, *j)
 				}
 			}
-			return ok(map[string]any{"role": "engineer", "profile": private(st.engineers[s.ID]), "jobs": newestFirst(jobs, func(j *Job) string { return j.Created }), "pricing": a.pricing()})
+			return ok(map[string]any{"role": "engineer", "profile": private(st.engineers[s.ID]), "jobs": newestFirst(jobs, func(j Job) string { return j.Created }), "pricing": a.pricing()})
 		},
 		"POST /api/me": func(b B, s *Session) Result {
 			st.mu.RLock()
 			r := a.role(s)
+			var cur *Hash
+			if r == "engineer" {
+				cur = st.engineers[s.ID].Auth
+			}
 			st.mu.RUnlock()
 			if r != "engineer" { // signed-out requests learn nothing about validation
 				return denied
@@ -248,12 +274,23 @@ func NewAPI(st *Store, dataDir string) *API {
 			if bad != "" {
 				return fail(400, bad)
 			}
+			// A new password needs the current one, so a session left open somewhere can't lock the owner out.
 			var auth *Hash
 			if pw, _ := b["password"].(string); pw != "" {
 				if _, ok := passwordOf(pw); !ok {
 					return fail(400, "password")
 				}
-				auth = hashPassword(pw)
+				given, _ := b["currentPassword"].(string)
+				good, err := verifyPassword(cur, given)
+				if err != nil {
+					return busy
+				}
+				if !good {
+					return fail(403, "currentPassword")
+				}
+				if auth, err = hashPassword(pw); err != nil {
+					return busy
+				}
 			}
 			st.mu.Lock()
 			defer st.mu.Unlock()
@@ -264,10 +301,13 @@ func NewAPI(st *Store, dataDir string) *API {
 			if err := change(st, st.engineers[s.ID], func(e *Engineer) {
 				e.Name, e.Headline, e.Skills, e.Rate, e.Packages, e.PayWith, e.Terms, e.Portfolio, e.About, e.Available = upd.Name, upd.Headline, upd.Skills, upd.Rate, upd.Packages, upd.PayWith, upd.Terms, upd.Portfolio, upd.About, upd.Available
 				if auth != nil {
-					e.Auth = auth
+					e.Auth, e.AuthVer = auth, e.AuthVer+1 // every other session of this engineer ends
 				}
 			}); err != nil {
 				return fail(500, "server")
+			}
+			if auth != nil { // this browser stays signed in with a fresh session
+				return Result{200, map[string]bool{"ok": true}, &Change{Login: &Session{Role: "engineer", ID: s.ID, Ver: engVer(st.engineers[s.ID])}}}
 			}
 			return ok(map[string]bool{"ok": true})
 		},
@@ -306,14 +346,18 @@ func NewAPI(st *Store, dataDir string) *API {
 			}); err != nil {
 				return fail(500, "server")
 			}
-			return ok(j)
+			return ok(*j) // a copy, taken while the lock is held
 		},
 
 		"POST /api/admin/login": func(b B, s *Session) Result {
 			email, _ := b["email"].(string)
 			pw, _ := b["password"].(string)
-			if o := ownerLogin(a.dataDir, email, pw); o == "ok" {
-				return Result{200, map[string]string{"role": "owner"}, &Change{Login: &Session{Role: "owner"}}}
+			o, ver, err := ownerLogin(a.dataDir, email, pw)
+			if err != nil {
+				return busy
+			}
+			if o == "ok" {
+				return Result{200, map[string]string{"role": "owner"}, &Change{Login: &Session{Role: "owner", Ver: ver}}}
 			} else {
 				st.mu.RLock()
 				var m *Staff
@@ -327,7 +371,11 @@ func NewAPI(st *Store, dataDir string) *API {
 					h = m.Auth
 				}
 				st.mu.RUnlock()
-				if verifyPassword(h, pw) && m != nil {
+				good, err := verifyPassword(h, pw)
+				if err != nil {
+					return busy
+				}
+				if good && m != nil {
 					return Result{200, map[string]string{"role": m.Role}, &Change{Login: &Session{Role: "staff", ID: m.ID}}}
 				}
 				if o == "setup" {
@@ -361,7 +409,11 @@ func NewAPI(st *Store, dataDir string) *API {
 			}
 			engineers := make([]engRow, 0, len(st.engineers))
 			for _, e := range st.engineers {
-				engineers = append(engineers, engRow{private(e), count[e.ID]})
+				row := engRow{private(e), count[e.ID]}
+				if !can(r, "accounts") { // moderators hide and show listings; they don't need contact or payment details
+					row.Email, row.PayWith = "", ""
+				}
+				engineers = append(engineers, row)
 			}
 			out := map[string]any{"me": map[string]any{"role": r, "perms": perms[r]}, "engineers": newestFirst(engineers, func(e engRow) string { return e.Created }), "pricing": a.pricing()}
 			if can(r, "accounts") {
@@ -389,7 +441,7 @@ func NewAPI(st *Store, dataDir string) *API {
 			}
 			if can(r, "money") {
 				type jobRow struct {
-					*Job
+					Job             // a copy: the reply is written after the lock is released
 					Engineer string `json:"engineer"`
 				}
 				rows := make([]jobRow, 0, len(jobs))
@@ -399,7 +451,7 @@ func NewAPI(st *Store, dataDir string) *API {
 					if e := st.engineers[j.EngineerID]; e != nil {
 						name = e.Name
 					}
-					rows = append(rows, jobRow{j, name})
+					rows = append(rows, jobRow{*j, name})
 					if j.Status == "complete" {
 						done, billed, fees = done+1, billed+*j.Amount, fees+*j.Fee
 					}
@@ -430,7 +482,7 @@ func NewAPI(st *Store, dataDir string) *API {
 			if err := change(st, e, func(e *Engineer) { e.Hidden = hidden }); err != nil {
 				return fail(500, "server")
 			}
-			return ok(private(e))
+			return ok(map[string]bool{"ok": true})
 		}),
 		// No email yet, so a forgotten engineer password is fixed by staff setting a temporary one.
 		"POST /api/admin/password": a.staffOnly("accounts", func(b B, s *Session) Result {
@@ -444,15 +496,18 @@ func NewAPI(st *Store, dataDir string) *API {
 				return fail(400, "password")
 			}
 			st.mu.Unlock() // hash outside the lock, then re-take it and re-check the role and the engineer
-			h := hashPassword(pw.(string))
+			h, err := hashPassword(pw.(string))
 			st.mu.Lock()
+			if err != nil {
+				return busy
+			}
 			if !can(a.role(s), "accounts") {
 				return denied
 			}
 			if e = st.engineers[id]; e == nil {
 				return gone
 			}
-			if err := change(st, e, func(e *Engineer) { e.Auth = h }); err != nil {
+			if err := change(st, e, func(e *Engineer) { e.Auth, e.AuthVer = h, e.AuthVer+1 }); err != nil { // signs them out everywhere
 				return fail(500, "server")
 			}
 			return ok(map[string]bool{"ok": true})
@@ -463,8 +518,11 @@ func NewAPI(st *Store, dataDir string) *API {
 				return fail(400, bad)
 			}
 			st.mu.Unlock() // hash outside the lock, then re-take it and re-check the role
-			h := hashPassword(d["password"].(string))
+			h, err := hashPassword(d["password"].(string))
 			st.mu.Lock()
+			if err != nil {
+				return busy
+			}
 			if !can(a.role(s), "staff") {
 				return denied
 			}
