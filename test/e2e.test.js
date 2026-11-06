@@ -155,8 +155,10 @@ test('engineer dashboard: accept, mark paid, complete with cancel, edit profile,
   assert.equal(await card.getByRole('button').count(), 0, 'no hire buttons while unavailable');
   await page.getByRole('tab', { name: 'For engineers' }).click();
   await f.locator('[name="available"]').check();
-  await f.getByRole('button', { name: 'Save profile' }).click();
+  // Wait for this save to finish: "Profile saved." is still on the page from the last one, and a save clears the password fields.
+  await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/engineers') && r.request().method() === 'GET'), f.getByRole('button', { name: 'Save profile' }).click()]);
   await page.getByText(/Profile saved\./).waitFor();
+  await f.getByRole('button', { name: 'Save profile' }).and(page.locator(':enabled')).waitFor(); // enabled again only once the save is done
   // A new password needs the current one.
   await f.locator('[name="newPassword"]').fill('maya new password');
   await f.locator('[name="currentPassword"]').fill('not my password');
