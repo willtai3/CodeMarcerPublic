@@ -2,24 +2,28 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
-	"regexp"
+	"log"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // Every API route: (body, session) → (status, JSON value, session change).
-// Roles: "engineer" (site account), "owner" (made with `codemarcer admin`), and staff members as "admin" or
-// "moderator". A session's role is re-read from the store on every request, so a removed or demoted member loses
-// access at once. Clients have no account: a hire request carries their name, email and phone.
+// Only staff sign in: the owner (made with `codemarcer admin`) and team members as "admin" or "moderator". A session's
+// role is re-read on every request, so a removed or demoted member loses access at once. Nobody else has an account:
+// engineers edit their listing with a private link sent to their email, and a hire request carries the client's
+// name, email and phone.
 
 type Session struct {
-	Role string    // "engineer", "owner" or "staff"
-	ID   string    // engineer or staff id
-	Ver  string    // the password version it was made with; a password change or reset ends older sessions
+	Role string    // "owner" or "staff"
+	ID   string    // staff id
+	Ver  string    // owner sessions: the owner password version they were made with
 	Exp  time.Time // set by the server
 }
 
@@ -37,6 +41,10 @@ type Result struct {
 type handler func(b B, s *Session) Result
 
 type API struct {
+	mail    Mailer
+	site    string // the site's address, for edit links
+	mailMu  sync.Mutex
+	mailed  map[string]time.Time // when each address was last sent a link
 	st      *Store
 	now     func() time.Time
 	dataDir string
@@ -54,12 +62,67 @@ func fail(code int, e string) Result {
 }
 
 var (
-	denied = fail(401, "auth")
-	gone   = fail(404, "not found")
-	busy   = fail(503, "busy") // every password-hashing slot stayed taken; try again shortly
+	denied  = fail(401, "auth")
+	gone    = fail(404, "not found")
+	busy    = fail(503, "busy") // every password-hashing slot stayed taken; try again shortly
+	badLink = fail(401, "key")
 )
 
-func engVer(e *Engineer) string { return strconv.Itoa(e.AuthVer) }
+// An edit link is the site address + "/#edit=" + the engineer id + "." + a 256-bit secret. Only the secret's SHA-256
+// is stored, and the part after # is never sent in requests, so it stays out of server logs.
+type mail struct{ to, subject, text string }
+
+// mailGap: an address gets at most one link per gap, so the form can't be used to flood someone's inbox.
+const mailGap = 10 * time.Minute
+
+// newLink makes a new edit link for e (the old one stops working) and the email that carries it; nil when this address
+// was sent a link too recently. Call with st.mu held for writing.
+func (a *API) newLink(e *Engineer, fresh bool) (*mail, error) {
+	a.mailMu.Lock()
+	now := a.now()
+	if last, seen := a.mailed[e.Email]; seen && !fresh && now.Sub(last) < mailGap {
+		a.mailMu.Unlock()
+		return nil, nil
+	}
+	a.mailed[e.Email] = now
+	a.mailMu.Unlock()
+	secret := make([]byte, 32)
+	rand.Read(secret)
+	token := base64.RawURLEncoding.EncodeToString(secret)
+	if err := change(a.st, e, func(e *Engineer) { e.EditKey = keyOf(token) }); err != nil {
+		return nil, err
+	}
+	subject, text := editMail(e.Name, a.site+"/#edit="+e.ID+"."+token, fresh)
+	return &mail{e.Email, subject, text}, nil
+}
+
+func keyOf(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// send delivers m outside the store lock; false when the email service refused it.
+func (a *API) send(m *mail) bool {
+	if m == nil {
+		return true
+	}
+	if err := a.mail.Send(m.to, m.subject, m.text); err != nil {
+		log.Printf("edit link email not sent: %v", err)
+		return false
+	}
+	return true
+}
+
+// byLink finds the engineer whose edit link is in b["key"]. Call with st.mu held.
+func (a *API) byLink(b B) *Engineer {
+	key, _ := b["key"].(string)
+	id, token, _ := strings.Cut(key, ".")
+	e := a.st.engineers[id]
+	if e == nil || e.EditKey == "" || len(token) != 43 || subtle.ConstantTimeCompare([]byte(keyOf(token)), []byte(e.EditKey)) != 1 {
+		return nil
+	}
+	return e
+}
 
 func newID() string {
 	b := make([]byte, 16)
@@ -83,15 +146,11 @@ func (a *API) role(s *Session) string {
 		if x := a.st.staff[s.ID]; x != nil && !x.Removed {
 			return x.Role
 		}
-	case s.Role == "engineer":
-		if e := a.st.engineers[s.ID]; e != nil && engVer(e) == s.Ver {
-			return "engineer"
-		}
 	}
 	return ""
 }
 
-// Views: what each audience may see. `auth` is never included.
+// Views: what each audience may see. `auth` and `editKey` are never included.
 
 type publicProfile struct {
 	ID        string    `json:"id"`
@@ -107,7 +166,7 @@ type publicProfile struct {
 	Created   string    `json:"created"`
 }
 
-func private(e *Engineer) Engineer { c := *e; c.Auth, c.AuthVer = nil, 0; return c }
+func private(e *Engineer) Engineer { c := *e; c.EditKey = ""; return c }
 func privateStaff(x *Staff) Staff  { c := *x; c.Auth = nil; return c }
 
 func newestFirst[T any](list []T, created func(T) string) []T {
@@ -139,26 +198,10 @@ func (a *API) directory() []publicProfile {
 	return list
 }
 
-var phoneRe = regexp.MustCompile(`^\+?[0-9 ().-]+$`)
-
-func phoneOf(v any) (any, bool) {
-	s, ok := strOf(7, 25, false)(v)
-	if !ok || !phoneRe.MatchString(s.(string)) {
-		return nil, false
-	}
-	n := 0
-	for _, r := range s.(string) {
-		if r >= '0' && r <= '9' {
-			n++
-		}
-	}
-	return s, n >= 7 && n <= 15
-}
-
 var hireSpec = []check{{"clientName", strOf(1, 80, false)}, {"clientEmail", emailOf}, {"clientPhone", phoneOf}, {"details", strOf(10, 2000, true)}, {"link", opt(linkOf)}}
 
-func NewAPI(st *Store, dataDir string) *API {
-	a := &API{st: st, now: time.Now, dataDir: dataDir}
+func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
+	a := &API{mail: m, site: strings.TrimRight(site, "/"), mailed: map[string]time.Time{}, st: st, now: time.Now, dataDir: dataDir}
 	a.routes = map[string]handler{
 		"GET /api/engineers": func(b B, s *Session) Result {
 			st.mu.RLock()
@@ -166,52 +209,97 @@ func NewAPI(st *Store, dataDir string) *API {
 			return ok(a.directory())
 		},
 
-		// Sign-up: the password is hashed before the lock; the email check and the add then happen under one lock,
-		// so two sign-ups with the same email can't both succeed.
+		// A new listing goes live at once; the engineer gets a private edit link by email. An email that is already
+		// listed gets a fresh link instead, with the same answer, so the form doesn't reveal who is listed.
 		"POST /api/engineers": func(b B, s *Session) Result {
-			e, pw, bad := profileOf(b, true)
+			e, bad := profileOf(b, true)
 			if bad != "" {
 				return fail(400, bad)
 			}
-			h, err := hashPassword(pw)
-			if err != nil {
-				return busy
-			}
-			e.Auth = h
 			st.mu.Lock()
-			defer st.mu.Unlock()
-			if st.byEmail[e.Email] != nil {
-				return fail(409, "email-taken")
+			to, fresh := st.byEmail[e.Email], false
+			if to == nil {
+				e.ID, e.Kind, e.Created = newID(), "engineer", a.stamp()
+				if err := st.addEngineer(e); err != nil {
+					st.mu.Unlock()
+					return fail(500, "server")
+				}
+				to, fresh = e, true
 			}
-			e.ID, e.Kind, e.Created = newID(), "engineer", a.stamp()
-			if err := st.addEngineer(e); err != nil {
+			m, err := a.newLink(to, fresh)
+			st.mu.Unlock()
+			if err != nil {
 				return fail(500, "server")
 			}
-			return Result{201, map[string]string{"role": "engineer"}, &Change{Login: &Session{Role: "engineer", ID: e.ID, Ver: engVer(e)}}}
+			return Result{201, map[string]bool{"sent": a.send(m)}, nil}
 		},
-		"POST /api/login": func(b B, s *Session) Result {
-			email, _ := b["email"].(string)
-			pw, _ := b["password"].(string)
-			st.mu.RLock()
-			e := st.byEmail[strings.ToLower(strings.TrimSpace(email))]
-			var h *Hash
-			var id, ver string
-			if e != nil {
-				h, id, ver = e.Auth, e.ID, engVer(e) // the session keeps the version that went with this hash
+		// "Email me my edit link": the same answer whether or not the email is listed.
+		"POST /api/edit-link": func(b B, s *Session) Result {
+			email, valid := emailOf(b["email"])
+			if !valid {
+				return fail(400, "email")
 			}
-			st.mu.RUnlock()
-			good, err := verifyPassword(h, pw)
+			st.mu.Lock()
+			var m *mail
+			var err error
+			if e := st.byEmail[email.(string)]; e != nil {
+				m, err = a.newLink(e, false)
+			}
+			st.mu.Unlock()
 			if err != nil {
-				return busy
+				return fail(500, "server")
 			}
-			if !good || e == nil {
-				return denied
-			}
-			return Result{200, map[string]string{"role": "engineer"}, &Change{Login: &Session{Role: "engineer", ID: id, Ver: ver}}}
+			a.send(m)
+			return ok(map[string]bool{"ok": true})
 		},
-		"POST /api/logout": func(b B, s *Session) Result { return Result{200, map[string]bool{"ok": true}, &Change{Logout: true}} },
+		"POST /api/listing": func(b B, s *Session) Result {
+			st.mu.RLock()
+			defer st.mu.RUnlock()
+			if e := a.byLink(b); e != nil {
+				return ok(private(e))
+			}
+			return badLink
+		},
+		"POST /api/listing/save": func(b B, s *Session) Result {
+			st.mu.RLock()
+			known := a.byLink(b) != nil
+			st.mu.RUnlock()
+			if !known { // a wrong link learns nothing about validation
+				return badLink
+			}
+			upd, bad := profileOf(b, false)
+			if bad != "" {
+				return fail(400, bad)
+			}
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			e := a.byLink(b)
+			if e == nil {
+				return badLink
+			}
+			// The email, the hidden flag and the id can't be set from here.
+			if err := change(st, e, func(e *Engineer) {
+				e.Name, e.Phone, e.Headline, e.Skills, e.Rate, e.Packages, e.PayWith, e.Terms, e.Portfolio, e.About, e.Available = upd.Name, upd.Phone, upd.Headline, upd.Skills, upd.Rate, upd.Packages, upd.PayWith, upd.Terms, upd.Portfolio, upd.About, upd.Available
+			}); err != nil {
+				return fail(500, "server")
+			}
+			return ok(private(e))
+		},
+		"POST /api/listing/remove": func(b B, s *Session) Result {
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			e := a.byLink(b)
+			if e == nil {
+				return badLink
+			}
+			if err := st.removeEngineer(e); err != nil {
+				return fail(500, "server")
+			}
+			return ok(map[string]bool{"ok": true})
+		},
 
-		// A hire request needs no account: name, email, phone and a description of the project.
+		// A hire request needs no account: name, email, phone and a description of the project. The client then gets the
+		// engineer's email, phone and payment details and contacts them directly.
 		"POST /api/jobs": func(b B, s *Session) Result {
 			id, _ := b["engineerId"].(string)
 			st.mu.Lock()
@@ -231,115 +319,11 @@ func NewAPI(st *Store, dataDir string) *API {
 			if bad != "" {
 				return fail(400, bad)
 			}
-			j := &Job{ID: newID(), Kind: "job", Created: a.stamp(), EngineerID: e.ID, ClientName: d["clientName"].(string), ClientEmail: d["clientEmail"].(string), ClientPhone: d["clientPhone"].(string), Details: d["details"].(string), Link: strPtr(d["link"]), Choice: *c, Quote: c.Quote, Status: "requested"}
+			j := &Job{ID: newID(), Kind: "job", Created: a.stamp(), EngineerID: e.ID, ClientName: d["clientName"].(string), ClientEmail: d["clientEmail"].(string), ClientPhone: d["clientPhone"].(string), Details: d["details"].(string), Link: strPtr(d["link"]), Choice: *c, Quote: c.Quote}
 			if err := st.addJob(j); err != nil {
 				return fail(500, "server")
 			}
-			// Only what the confirmation shows. The engineer has the client's contact details and gets in touch; their own
-			// email and payment handle are not handed to anyone who sends a request.
-			return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "terms": e.Terms}, "quote": c.Quote}, nil}
-		},
-
-		"GET /api/me": func(b B, s *Session) Result {
-			st.mu.RLock()
-			defer st.mu.RUnlock()
-			if a.role(s) != "engineer" {
-				return denied
-			}
-			jobs := []Job{} // copies: the reply is written after the lock is released
-			for _, j := range st.jobs {
-				if j.EngineerID == s.ID {
-					jobs = append(jobs, *j)
-				}
-			}
-			return ok(map[string]any{"role": "engineer", "profile": private(st.engineers[s.ID]), "jobs": newestFirst(jobs, func(j Job) string { return j.Created })})
-		},
-		"POST /api/me": func(b B, s *Session) Result {
-			st.mu.RLock()
-			r := a.role(s)
-			var cur *Hash
-			if r == "engineer" {
-				cur = st.engineers[s.ID].Auth
-			}
-			st.mu.RUnlock()
-			if r != "engineer" { // signed-out requests learn nothing about validation
-				return denied
-			}
-			upd, _, bad := profileOf(b, false)
-			if bad != "" {
-				return fail(400, bad)
-			}
-			// A new password needs the current one, so a session left open somewhere can't lock the owner out.
-			var auth *Hash
-			if pw, _ := b["password"].(string); pw != "" {
-				if _, ok := passwordOf(pw); !ok {
-					return fail(400, "password")
-				}
-				given, _ := b["currentPassword"].(string)
-				good, err := verifyPassword(cur, given)
-				if err != nil {
-					return busy
-				}
-				if !good {
-					return fail(403, "currentPassword")
-				}
-				if auth, err = hashPassword(pw); err != nil {
-					return busy
-				}
-			}
-			st.mu.Lock()
-			defer st.mu.Unlock()
-			if a.role(s) != "engineer" {
-				return denied
-			}
-			// Only profile fields change; email, hidden and the id can't be set from here.
-			if err := change(st, st.engineers[s.ID], func(e *Engineer) {
-				e.Name, e.Headline, e.Skills, e.Rate, e.Packages, e.PayWith, e.Terms, e.Portfolio, e.About, e.Available = upd.Name, upd.Headline, upd.Skills, upd.Rate, upd.Packages, upd.PayWith, upd.Terms, upd.Portfolio, upd.About, upd.Available
-				if auth != nil {
-					e.Auth, e.AuthVer = auth, e.AuthVer+1 // every other session of this engineer ends
-				}
-			}); err != nil {
-				return fail(500, "server")
-			}
-			if auth != nil { // this browser stays signed in with a fresh session
-				return Result{200, map[string]bool{"ok": true}, &Change{Login: &Session{Role: "engineer", ID: s.ID, Ver: engVer(st.engineers[s.ID])}}}
-			}
-			return ok(map[string]bool{"ok": true})
-		},
-		// The engineer moves a job through its statuses; completing records the final amount the client paid them.
-		"POST /api/me/jobs": func(b B, s *Session) Result {
-			id, _ := b["id"].(string)
-			to, _ := b["status"].(string)
-			st.mu.Lock()
-			defer st.mu.Unlock()
-			if a.role(s) != "engineer" {
-				return denied
-			}
-			j := st.jobs[id]
-			if j == nil || j.EngineerID != s.ID {
-				return gone
-			}
-			if !allowed(next, j.Status, to) {
-				return fail(409, "status")
-			}
-			amount := any(j.Quote)
-			if v, set := b["amount"]; set && v != nil {
-				amount = v
-			}
-			n, valid := intOf(1, 10_000_000)(amount)
-			if to == "complete" && !valid {
-				return fail(400, "amount")
-			}
-			if err := change(st, j, func(j *Job) {
-				j.Status = to
-				if to == "complete" {
-					amt, stamp := n.(int), a.stamp()
-					j.Amount, j.Completed = &amt, &stamp
-				}
-			}); err != nil {
-				return fail(500, "server")
-			}
-			return ok(*j) // a copy, taken while the lock is held
+			return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "email": e.Email, "phone": e.Phone, "payWith": e.PayWith, "terms": e.Terms}, "quote": c.Quote}, nil}
 		},
 
 		"POST /api/admin/login": func(b B, s *Session) Result {
@@ -404,7 +388,7 @@ func NewAPI(st *Store, dataDir string) *API {
 			for _, e := range st.engineers {
 				row := engRow{private(e), count[e.ID]}
 				if !can(r, "accounts") { // moderators hide and show listings; they don't need contact or payment details
-					row.Email, row.PayWith = "", ""
+					row.Email, row.Phone, row.PayWith = "", "", ""
 				}
 				engineers = append(engineers, row)
 			}
@@ -438,18 +422,14 @@ func NewAPI(st *Store, dataDir string) *API {
 					Engineer string `json:"engineer"`
 				}
 				rows := make([]jobRow, 0, len(jobs))
-				done, billed := 0, 0
 				for _, j := range jobs {
 					name := "(removed)"
 					if e := st.engineers[j.EngineerID]; e != nil {
 						name = e.Name
 					}
 					rows = append(rows, jobRow{*j, name})
-					if j.Status == "complete" {
-						done, billed = done+1, billed+*j.Amount
-					}
 				}
-				out["jobs"], out["totals"] = rows, map[string]any{"requested": len(jobs), "completed": done, "billed": billed}
+				out["jobs"] = rows
 			}
 			if can(r, "staff") {
 				staff := []Staff{}
@@ -473,34 +453,6 @@ func NewAPI(st *Store, dataDir string) *API {
 				return fail(400, "hidden")
 			}
 			if err := change(st, e, func(e *Engineer) { e.Hidden = hidden }); err != nil {
-				return fail(500, "server")
-			}
-			return ok(map[string]bool{"ok": true})
-		}),
-		// No email yet, so a forgotten engineer password is fixed by staff setting a temporary one.
-		"POST /api/admin/password": a.staffOnly("accounts", func(b B, s *Session) Result {
-			id, _ := b["id"].(string)
-			e := st.engineers[id]
-			if e == nil {
-				return gone
-			}
-			pw, valid := passwordOf(b["password"])
-			if !valid {
-				return fail(400, "password")
-			}
-			st.mu.Unlock() // hash outside the lock, then re-take it and re-check the role and the engineer
-			h, err := hashPassword(pw.(string))
-			st.mu.Lock()
-			if err != nil {
-				return busy
-			}
-			if !can(a.role(s), "accounts") {
-				return denied
-			}
-			if e = st.engineers[id]; e == nil {
-				return gone
-			}
-			if err := change(st, e, func(e *Engineer) { e.Auth, e.AuthVer = h, e.AuthVer+1 }); err != nil { // signs them out everywhere
 				return fail(500, "server")
 			}
 			return ok(map[string]bool{"ok": true})

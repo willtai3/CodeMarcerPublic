@@ -1,14 +1,13 @@
-import { $, $$, h, api, tabs, date, usd } from './ui.js';
+import { $, $$, h, api, tabs, usd } from './ui.js';
 
 // ---- Shared form helpers ----
 const MSG = {
   rate: 'Too many attempts from this connection. Try again later.', request: 'That request was refused. Reload the page and try again.',
-  pricing: 'Add an hourly rate or at least one package.', 'email-taken': 'That email is already listed. Sign in instead.',
-  password: 'Use a password of 10 to 200 characters.', currentPassword: 'Your current password is wrong.', busy: 'The server is busy. Try again in a moment.', auth: 'Wrong email or password.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
+  pricing: 'Add an hourly rate or at least one package.', key: 'This edit link no longer works. Get a new one with "Email me my edit link" below.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
 };
 const labelOf = el => el?.closest('label')?.firstChild.textContent.split(/,| \(/)[0].trim().toLowerCase().replace(/^your /, '');
 const fail = (form, err) => {
-  const field = form.elements[err.field] ?? (err.field === 'password' && form.elements.newPassword);
+  const field = form.elements[err.field];
   if (field?.focus) field.setAttribute('aria-invalid', 'true'), field.focus();
   const m = $('.msg', form); m.className = 'msg error';
   m.textContent = MSG[err.field] ?? (field?.focus ? `Check the ${labelOf(field)}.` : "Couldn't send. Check your connection and try again; nothing was lost.");
@@ -19,7 +18,7 @@ const onSubmit = (form, send) => form.addEventListener('submit', async e => {
   const btn = $('button.primary', form), m = $('.msg', form);
   $$('[aria-invalid]', form).forEach(el => el.removeAttribute('aria-invalid'));
   btn.disabled = true; m.className = 'msg'; m.textContent = 'Sending';
-  try { await send(); m.textContent = ''; } catch (err) { fail(form, err); } finally { btn.disabled = false; }
+  try { m.textContent = (await send()) ?? ''; } catch (err) { fail(form, err); } finally { btn.disabled = false; }
 });
 const sentence = s => s.replace(/\.$/, '') + '.'; // "Maya R." doesn't end up with two dots
 const fields = form => Object.fromEntries([...new FormData(form)].filter(([k]) => !k.startsWith('pkg-')));
@@ -86,16 +85,17 @@ const openHire = (e, choice, slot) => {
     const r = await api('/api/jobs', { ...fields(form), engineerId: e.id, choice });
     slot.replaceChildren(h('div', { className: 'done', role: 'status' },
       h('p', {}, h('strong', { textContent: sentence(`Request sent to ${r.engineer.name}`) }), ` Quote ${usd(r.quote)}.`),
-      h('p', { textContent: `They have your email and phone and will contact you to agree the details and how to pay. Payment terms: ${r.engineer.terms.toLowerCase()}.` }),
-      h('p', { className: 'meta', textContent: `Pay the engineer directly. CodeMarcer never holds the money; agree the scope in writing before paying.` })));
+      h('p', {}, 'Contact them to agree the details: ', h('strong', { className: 'select', textContent: r.engineer.email }), ' · ', h('strong', { className: 'select', textContent: r.engineer.phone })),
+      h('p', { textContent: `They take payment by ${r.engineer.payWith}. Payment terms: ${r.engineer.terms.toLowerCase()}.` }),
+      h('p', { className: 'meta', textContent: 'They also have your email and phone. Pay the engineer directly. CodeMarcer never holds the money; agree the scope in writing before paying.' })));
   });
   slot.replaceChildren(form);
   form.elements[hourly ? 'hours' : 'clientName'].focus();
 };
 
-// ---- For engineers: sign in, profile, requests from clients (clients have no account) ----
-const profile = $('#profile'), pkgs = $('#pkgs');
-let role = null, me = null;
+// ---- For engineers: no account. A listing is edited with the private link emailed to the engineer. ----
+const profile = $('#profile'), pkgs = $('#pkgs'), relink = $('#relink');
+let key = null; // the edit key from the link, kept in memory only
 const pkgRow = (p = {}) => {
   const inp = (f, label, props) => h('label', {}, label, h('input', { name: `pkg-${f}`, value: p[f] ?? '', ...props }));
   const row = h('fieldset', { className: 'pkg' },
@@ -103,75 +103,68 @@ const pkgRow = (p = {}) => {
     inp('title', 'Package', { maxLength: 60, placeholder: 'Deploy your app with HTTPS' }),
     inp('price', 'Price, USD', { inputMode: 'numeric', placeholder: '400' }),
     inp('days', 'Days', { inputMode: 'numeric', placeholder: '5' }),
-    h('button', { className: 'icon', type: 'button', ariaLabel: 'Remove package', title: 'Remove package', innerHTML: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>', onclick: () => { row.remove(); syncAdd(); } }),
+    h('button', { className: 'icon', type: 'button', ariaLabel: 'Remove package', title: 'Remove package', innerHTML: TRASH, onclick: () => { row.remove(); syncAdd(); } }),
     inp('details', 'What is included (optional)', { maxLength: 300, className: 'wide' }));
   pkgs.append(row); syncAdd();
 };
+const TRASH = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
 const syncAdd = () => { $('#add-pkg').hidden = pkgs.children.length >= 5; };
 $('#add-pkg').onclick = () => { pkgRow(); $('input', pkgs.lastChild).focus(); };
 const readPkgs = () => $$('.pkg', pkgs).map(r => Object.fromEntries($$('input', r).map(i => [i.name.slice(4), i.value.trim()]))).filter(p => Object.values(p).some(Boolean));
-
 const fill = p => {
-  for (const k of ['name', 'headline', 'payWith', 'terms', 'portfolio', 'about']) profile.elements[k].value = p[k] ?? '';
+  for (const k of ['name', 'email', 'phone', 'headline', 'payWith', 'terms', 'portfolio', 'about']) profile.elements[k].value = p[k] ?? '';
   profile.elements.skills.value = p.skills.join(', '); profile.elements.rate.value = p.rate ?? ''; profile.elements.available.checked = p.available;
   pkgs.replaceChildren(); p.packages.forEach(pkgRow); syncAdd();
 };
-const setMode = (r, p = null) => {
-  role = r; me = p;
-  const on = r === 'engineer';
-  $$('[data-show]').forEach(el => (el.hidden = !el.dataset.show.split(' ').includes(r ?? 'out')));
-  $$('[data-signup]', profile).forEach(el => (el.hidden = on)); $$('[data-edit]', profile).forEach(el => (el.hidden = !on));
-  $('#profile-intro').textContent = on ? 'Your profile, as clients see it on the Find an engineer tab.' : 'New here? List yourself with your rate and packages.';
-  $('#profile-save').textContent = on ? 'Save profile' : 'List me';
-};
+const clear = () => { profile.reset(); pkgs.replaceChildren(); pkgRow(); };
+const say = (form, text) => { const m = $('.msg', form); m.className = 'msg'; m.textContent = text; };
 
-const STATUS = { requested: 'New request', accepted: 'Accepted', paid: 'Paid', complete: 'Complete', declined: 'Declined' };
-const ACTIONS = { requested: [['accepted', 'Accept'], ['declined', 'Decline']], accepted: [['paid', 'Mark paid'], ['complete', 'Mark complete'], ['declined', 'Decline']], paid: [['complete', 'Mark complete']] };
-const what = c => c.type === 'hourly' ? `${c.hours} hours at ${usd(c.rate)}/hour` : c.title;
-const setJob = async (btn, body) => { btn.disabled = true; try { await api('/api/me/jobs', body); await loadMe(); } catch (err) { err.status === 401 ? setMode(null) : (btn.disabled = false, btn.closest('li').querySelector('.msg').textContent = `Couldn't update: ${err.message}.`); } };
-const small = (label, onclick) => h('button', { className: 'small', type: 'button', textContent: label, onclick });
-const job = j => {
-  const actions = h('div', { className: 'inline wrap' });
-  const complete = () => {
-    const amt = h('input', { inputMode: 'numeric', value: j.quote, ariaLabel: 'Final amount in USD' });
-    actions.replaceChildren(h('label', { className: 'inline' }, 'Final amount, USD', amt), h('button', { className: 'small', type: 'button', textContent: 'Confirm complete', onclick: e => setJob(e.currentTarget, { id: j.id, status: 'complete', amount: amt.value.replace(/\D/g, '') }) }), h('button', { className: 'small', type: 'button', textContent: 'Cancel', onclick: draw }));
-    amt.focus();
-  };
-  const draw = () => actions.replaceChildren(...(ACTIONS[j.status] ?? []).map(([s, label]) => h('button', { className: 'small', type: 'button', textContent: label, onclick: e => s === 'complete' ? complete() : setJob(e.currentTarget, { id: j.id, status: s }) })));
-  draw();
-  return h('li', { className: 'job' },
-    h('div', { className: 'row-between' }, h('strong', { textContent: `${j.clientName} · ${date(j.created)}` }), h('span', { className: `status s-${j.status}`, textContent: STATUS[j.status] })),
-    h('p', { textContent: `${what(j.choice)} · quote ${usd(j.quote)}` }),
-    h('p', {}, h('span', { className: 'select', textContent: j.clientEmail }), ' · ', h('span', { className: 'select', textContent: j.clientPhone })),
-    h('p', { className: 'about', textContent: j.details }),
-    j.link && h('a', { href: j.link, textContent: j.link, rel: 'noopener noreferrer', target: '_blank' }),
-    j.status === 'complete' && h('p', { className: 'meta', textContent: `Completed for ${usd(j.amount)}.` }),
-    actions, h('p', { className: 'msg', role: 'status' }));
+// Two modes: a new listing, or editing one opened from its link (the email can't change).
+const setMode = p => {
+  key = p ? key : null;
+  $$('[data-new]').forEach(el => (el.hidden = !!p)); $$('[data-edit]').forEach(el => (el.hidden = !p));
+  $('#editing').hidden = !p; profile.elements.email.readOnly = !!p;
+  $('#profile-intro').textContent = p ? 'Your listing, as clients see it on the Find an engineer tab.' : 'List yourself with your rate and packages. No account needed.';
+  $('#profile-save').textContent = p ? 'Save changes' : 'List me';
+  if (p) $('#who').textContent = `Editing the listing for ${p.name} (${p.email}).`, fill(p), drawRemove(); else clear();
 };
-const empty = text => h('li', { className: 'empty', textContent: text });
-const loadMe = async () => {
-  const { role: r, profile: p, jobs } = await api('/api/me');
-  setMode(r, p);
-  const open = jobs.filter(j => ACTIONS[j.status]).length;
-  $$('.who').forEach(el => (el.textContent = `Signed in as ${p.name} (${p.email}). ${open ? `${open} open request${open > 1 ? 's' : ''}.` : 'No open requests.'}`));
-  fill(p); $('#jobs').replaceChildren(...jobs.map(job), ...(jobs.length ? [] : [empty('No requests yet. They appear here when a client hires you.')]));
-  return r;
+const drawRemove = () => $('#remove-slot').replaceChildren(h('button', { className: 'quiet', type: 'button', textContent: 'Remove my listing', onclick: () => {
+  $('#remove-slot').replaceChildren(h('span', { textContent: 'Remove your listing for good?' }), h('button', { className: 'small danger', type: 'button', textContent: 'Remove', onclick: async e => {
+    e.currentTarget.disabled = true;
+    try { await api('/api/listing/remove', { key }); setMode(null); say(profile, 'Your listing is removed.'); loadList(); }
+    catch (err) { drawRemove(); fail(profile, err); }
+  } }), h('button', { className: 'small', type: 'button', textContent: 'Cancel', onclick: drawRemove }));
+  $('.danger', $('#remove-slot')).focus();
+} }));
+// Opening an edit link: the key leaves the address bar at once (so it isn't left on screen or in history), then the
+// listing loads.
+const openLink = async () => {
+  const k = /^#edit=([\w-]+\.[\w-]{43})$/.exec(location.hash)?.[1];
+  if (!k) return;
+  history.replaceState(null, '', '#engineers');
+  try { key = k; setMode(await api('/api/listing', { key })); }
+  catch (err) { setMode(null); say(relink, err.status === 401 ? MSG.key : "Couldn't open your listing. Check your connection and open the link again."); }
 };
+addEventListener('hashchange', openLink); // before tabs(), so a link opened on this page lands on the right tab
 
-for (const form of $$('.signin')) onSubmit(form, async () => {
-  await api('/api/login', fields(form)); form.reset();
-  await loadMe(); location.hash = 'engineers';
-});
 onSubmit(profile, async () => {
-  const isNew = role !== 'engineer', { newPassword, currentPassword, ...b } = fields(profile), body = { ...b, available: profile.elements.available.checked, packages: readPkgs(), ...(!isNew && { password: newPassword, currentPassword }) };
-  await api(isNew ? '/api/engineers' : '/api/me', body);
-  profile.elements.newPassword.value = profile.elements.currentPassword.value = profile.elements.password.value = '';
-  await loadMe(); await loadList();
-  $('.msg', profile).textContent = ''; $('#who').textContent += isNew ? " You're listed." : ' Profile saved.';
-  $('#who').scrollIntoView({ block: 'nearest' });
+  const body = { ...fields(profile), available: profile.elements.available.checked, packages: readPkgs() };
+  if (key) {
+    setMode(await api('/api/listing/save', { ...body, key })); await loadList();
+    return 'Saved. Clients see the change now.';
+  }
+  const { sent } = await api('/api/engineers', body);
+  clear(); await loadList();
+  return sent ? `You're listed. We've emailed a private link to edit or remove your listing to ${body.email}. (If that email was already listed, nothing changed and we sent its link instead.)`
+    : "Your listing is saved, but the email with your edit link couldn't be sent just now. Use \"Email me my edit link\" below in a few minutes.";
 });
-for (const b of $$('.signout')) b.onclick = async () => { await api('/api/logout', {}).catch(() => {}); setMode(null); profile.reset(); pkgs.replaceChildren(); pkgRow(); $$('.hire-slot').forEach(s => s.replaceChildren()); };
+onSubmit(relink, async () => {
+  const { email } = fields(relink);
+  await api('/api/edit-link', { email }); relink.reset();
+  return `If ${email} is listed, a new link is on its way and older links stop working. One email per 10 minutes.`;
+});
+$('#stop-edit').onclick = () => { setMode(null); say(profile, ''); };
 
-setMode(null); pkgRow();
+setMode(null);
+openLink();
 tabs($('.tabs'), name => name === 'find' && loadList()); // fresh list each time the tab opens
-loadMe().catch(() => {});

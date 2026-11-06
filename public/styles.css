@@ -76,8 +76,8 @@ details p { margin: 6px 0; max-width: 46ch; }
 /* Marketplace */
 .search { margin-bottom: 16px; }
 .stack { display: grid; gap: 14px; margin-bottom: 20px; }
-.signin { padding-bottom: 20px; border-bottom: 1px solid var(--line); }
-.signin p, #profile-intro { margin: 0; }
+#relink { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+#relink p, #profile-intro { margin: 0; }
 .row-between { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .card > * { max-width: 100%; }
 .card .hire-slot { justify-self: stretch; }
@@ -98,13 +98,6 @@ details p { margin: 6px 0; max-width: 46ch; }
 .icon { width: 34px; height: 34px; display: inline-grid; place-items: center; padding: 0; border: 1px solid var(--field); border-radius: 6px; background: var(--bg); color: var(--fg); }
 .icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #add-pkg { justify-self: start; }
-.jobs { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
-.job { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
-.job p { margin: 0; }
-.status { font-size: 13px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--fg); white-space: nowrap; }
-.s-requested { background: var(--fg); color: var(--bg); }
-.s-complete { border-color: var(--ok); color: var(--ok); }
-.s-declined { border-color: var(--mute); color: var(--mute); }
 .wrap { flex-wrap: wrap; white-space: normal; }
 .inline label { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
 .inline label input { width: 110px; height: 28px; }
@@ -112,7 +105,6 @@ details p { margin: 6px 0; max-width: 46ch; }
 @media (max-width: 560px) { .pkg { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 34px; } .pkg label:first-of-type { grid-column: 1 / -1; } .pkgs li { flex-wrap: wrap; } }
 .done { display: grid; gap: 8px; }
 .done p { margin: 0; }
-.job .msg:empty { display: none; }
 .team-add { margin-top: 20px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
 .team-add .primary { justify-self: start; }
 .cols-bar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
@@ -123,3 +115,4 @@ details p { margin: 6px 0; max-width: 46ch; }
 .more-rows { margin-top: 12px; }
 .danger { background: #e5251c; border-color: #e5251c; color: #fff; }
 .board .more { list-style: none; }
+input[readonly] { color: var(--mute); background: transparent; border-style: dashed; }

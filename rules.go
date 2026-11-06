@@ -200,7 +200,7 @@ func packagesOf(v any) (any, bool) {
 var terms = []string{"Upfront", "Half upfront, half on completion", "On completion", "Discuss with client"}
 
 var profileSpec = []check{{"name", strOf(1, 80, false)}, {"headline", strOf(5, 80, false)}, {"skills", skillsOf}, {"rate", opt(intOf(10, 1000))}, {"packages", packagesOf}, {"payWith", strOf(3, 200, false)}, {"terms", oneOf(terms...)}, {"portfolio", opt(linkOf)}, {"about", opt(strOf(1, 1000, true))}, {"available", boolOf}}
-var signupSpec = append([]check{profileSpec[0], {"email", emailOf}, {"password", passwordOf}}, profileSpec[1:]...)
+var listSpec = append([]check{profileSpec[0], {"email", emailOf}, {"phone", phoneOf}}, profileSpec[1:]...)
 var staffSpec = []check{{"name", strOf(1, 80, false)}, {"email", emailOf}, {"password", passwordOf}, {"role", oneOf("admin", "moderator")}}
 
 // What each staff role may do. The owner is the account made with `codemarcer admin`.
@@ -215,37 +215,42 @@ func can(role, perm string) bool {
 	return false
 }
 
-// Jobs move forward only: the engineer accepts or declines, then marks paid and complete.
-var next = map[string][]string{"requested": {"accepted", "declined"}, "accepted": {"paid", "complete", "declined"}, "paid": {"complete"}}
-
-func allowed(table map[string][]string, from, to string) bool {
-	for _, s := range table[from] {
-		if s == to {
-			return true
-		}
-	}
-	return false
-}
-
-// profileOf validates an engineer profile; it needs an hourly rate, at least one package, or both.
-func profileOf(b B, signup bool) (*Engineer, string, string) {
-	spec := profileSpec
-	if signup {
-		spec = signupSpec
+// profileOf validates an engineer profile; it needs an hourly rate, at least one package, or both. A new listing
+// also carries the engineer's email and phone; an edit keeps the email and may change the phone.
+func profileOf(b B, isNew bool) (*Engineer, string) {
+	spec := append([]check{{"phone", phoneOf}}, profileSpec...)
+	if isNew {
+		spec = listSpec
 	}
 	d, bad := validate(spec, b)
 	if bad != "" {
-		return nil, "", bad
+		return nil, bad
 	}
-	e := &Engineer{Name: d["name"].(string), Headline: d["headline"].(string), Skills: d["skills"].([]string), Rate: intPtr(d["rate"]), Packages: d["packages"].([]Package), PayWith: d["payWith"].(string), Terms: d["terms"].(string), Portfolio: strPtr(d["portfolio"]), About: strPtr(d["about"]), Available: d["available"].(bool)}
+	e := &Engineer{Name: d["name"].(string), Phone: d["phone"].(string), Headline: d["headline"].(string), Skills: d["skills"].([]string), Rate: intPtr(d["rate"]), Packages: d["packages"].([]Package), PayWith: d["payWith"].(string), Terms: d["terms"].(string), Portfolio: strPtr(d["portfolio"]), About: strPtr(d["about"]), Available: d["available"].(bool)}
 	if e.Rate == nil && len(e.Packages) == 0 {
-		return nil, "", "pricing"
+		return nil, "pricing"
 	}
-	pw := ""
-	if signup {
-		e.Email, pw = d["email"].(string), d["password"].(string)
+	if isNew {
+		e.Email = d["email"].(string)
 	}
-	return e, pw, ""
+	return e, ""
+}
+
+var phoneRe = regexp.MustCompile(`^\+?[0-9 ().-]+$`)
+
+// phoneOf: 7 to 15 digits, written with the usual spaces, dots, dashes and brackets.
+func phoneOf(v any) (any, bool) {
+	s, ok := strOf(7, 25, false)(v)
+	if !ok || !phoneRe.MatchString(s.(string)) {
+		return nil, false
+	}
+	n := 0
+	for _, r := range s.(string) {
+		if r >= '0' && r <= '9' {
+			n++
+		}
+	}
+	return s, n >= 7 && n <= 15
 }
 
 var pkgChoice = regexp.MustCompile(`^p([0-4])$`)

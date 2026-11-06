@@ -1,12 +1,19 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -33,7 +40,7 @@ func TestTags(t *testing.T) {
 }
 
 func engineerBody() B {
-	return B{"name": "Maya R.", "email": "maya@example.com", "password": "maya password 1", "headline": "I take AI-built apps live", "skills": "next, stripe", "rate": "120",
+	return B{"name": "Maya R.", "email": "maya@example.com", "phone": "(555) 123-4567", "headline": "I take AI-built apps live", "skills": "next, stripe", "rate": "120",
 		"packages": []any{map[string]any{"title": "Deploy your app", "price": "400", "days": "5", "details": ""}}, "payWith": "Venmo @maya", "terms": "Upfront", "portfolio": "", "about": "", "available": true}
 }
 
@@ -51,11 +58,11 @@ func with(b B, k string, v any) B {
 }
 
 func TestProfileValidation(t *testing.T) {
-	e, pw, bad := profileOf(engineerBody(), true)
-	if bad != "" || pw != "maya password 1" || *e.Rate != 120 || e.Packages[0].Price != 400 || e.Packages[0].Details != nil || e.About != nil {
+	e, bad := profileOf(engineerBody(), true)
+	if bad != "" || e.Email != "maya@example.com" || e.Phone != "(555) 123-4567" || *e.Rate != 120 || e.Packages[0].Price != 400 || e.Packages[0].Details != nil || e.About != nil {
 		t.Fatalf("valid sign-up: bad=%q e=%+v", bad, e)
 	}
-	if _, _, bad := profileOf(with(with(engineerBody(), "rate", ""), "packages", []any{}), true); bad != "pricing" {
+	if _, bad := profileOf(with(with(engineerBody(), "rate", ""), "packages", []any{}), true); bad != "pricing" {
 		t.Errorf("no rate and no packages: %q", bad)
 	}
 	for _, c := range []struct {
@@ -63,19 +70,19 @@ func TestProfileValidation(t *testing.T) {
 		v    any
 		want string
 	}{
-		{"email", "x", "email"}, {"password", "short", "password"}, {"headline", "hi", "headline"}, {"skills", " , ", "skills"},
+		{"email", "x", "email"}, {"phone", "12345", "phone"}, {"phone", nil, "phone"}, {"headline", "hi", "headline"}, {"skills", " , ", "skills"},
 		{"rate", "5", "rate"}, {"rate", "12.5", "rate"}, {"rate", 12.5, "rate"}, {"rate", "-20", "rate"},
 		{"packages", []any{map[string]any{"title": "ok title", "price": "10", "days": "2"}}, "packages"},
 		{"payWith", "", "payWith"}, {"terms", "Never", "terms"}, {"portfolio", "http://x.example", "portfolio"},
 		{"portfolio", "https://user:pw@x.example", "portfolio"}, {"portfolio", "javascript:alert(1)", "portfolio"},
 		{"available", "yes", "available"}, {"name", "Maya‮", "name"}, {"name", "two\nlines", "name"},
 	} {
-		if _, _, bad := profileOf(with(engineerBody(), c.k, c.v), true); bad != c.want {
+		if _, bad := profileOf(with(engineerBody(), c.k, c.v), true); bad != c.want {
 			t.Errorf("%s=%q: got %q, want %q", c.k, c.v, bad, c.want)
 		}
 	}
-	if _, _, bad := profileOf(with(with(engineerBody(), "email", nil), "password", nil), false); bad != "" {
-		t.Errorf("edit without email/password: %q", bad)
+	if e, bad := profileOf(with(engineerBody(), "email", "other@example.com"), false); bad != "" || e.Email != "" {
+		t.Errorf("an edit can't change the email: %q %q", bad, e.Email)
 	}
 	if _, ok := strOf(1, 1000, true)("line one\nline two"); !ok {
 		t.Error("multi-line field refused a newline")
@@ -110,17 +117,6 @@ func TestPhone(t *testing.T) {
 	for _, bad := range []string{"", "12345", "call me maybe", "+1 555 123 4567 8901 234", "555-12\n34567"} {
 		if _, valid := phoneOf(bad); valid {
 			t.Errorf("%q accepted", bad)
-		}
-	}
-}
-
-func TestJobStatusOnlyMovesForward(t *testing.T) {
-	for _, c := range []struct {
-		from, to string
-		want     bool
-	}{{"requested", "accepted", true}, {"requested", "complete", false}, {"accepted", "paid", true}, {"paid", "complete", true}, {"complete", "accepted", false}, {"declined", "accepted", false}} {
-		if got := allowed(next, c.from, c.to); got != c.want {
-			t.Errorf("%s → %s: %v", c.from, c.to, got)
 		}
 	}
 }
@@ -200,7 +196,7 @@ func TestOwnerFile(t *testing.T) {
 func TestOwnerSessionEndsWhenThePasswordIsReplaced(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := OpenStore(dir)
-	a := NewAPI(st, dir)
+	a := NewAPI(st, dir, &memMail{}, "https://codemarcer.test")
 	if err := setOwner(dir, "me@example.com", "long enough password"); err != nil {
 		t.Fatal(err)
 	}
@@ -271,56 +267,219 @@ func TestInvisibleCharacters(t *testing.T) {
 func TestConcurrentRequestsDontRace(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := OpenStore(dir)
-	sv := &server{api: NewAPI(st, dir), static: map[string][]byte{}, hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
+	mm := &memMail{}
+	sv := &server{api: NewAPI(st, dir, mm, "https://codemarcer.test"), static: map[string][]byte{}, hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
 	n := 0
-	do := func(m, p, body, c string) *httptest.ResponseRecorder {
+	do := func(m, p, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(m, p, strings.NewReader(body))
 		r.Header.Set("Content-Type", "application/json")
 		sv.mu.Lock()
 		n++
 		r.RemoteAddr = fmt.Sprintf("10.0.%d.%d:1", n/250, n%250) // a new address each time, so no limit is hit
 		sv.mu.Unlock()
-		if c != "" {
-			r.Header.Set("Cookie", c)
-		}
 		w := httptest.NewRecorder()
 		sv.ServeHTTP(w, r)
 		return w
 	}
-	w := do("POST", "/api/engineers", `{"name":"A","email":"a@b.co","password":"pppppppppppp","headline":"hello there","skills":"go","rate":50,"payWith":"cash","terms":"Upfront","available":true}`, "")
-	c := strings.Split(w.Header().Get("Set-Cookie"), ";")[0]
+	listing := `"name":"A","phone":"5551234567","headline":"hello there","skills":"go","rate":50,"payWith":"cash","terms":"Upfront","available":true`
+	if w := do("POST", "/api/engineers", `{"email":"a@b.co",`+listing+`}`); w.Code != 201 {
+		t.Fatalf("listing %d", w.Code)
+	}
+	key := mm.key(t, 0)
 	var id string
 	for k := range st.engineers {
 		id = k
 	}
-	for i := 0; i < 20; i++ {
-		do("POST", "/api/jobs", `{"engineerId":"`+id+`","choice":"hourly","hours":2,"clientName":"C","clientEmail":"c@d.co","clientPhone":"5551234567","details":"0123456789ab"}`, "")
-	}
-	jobs := []string{}
-	for k := range st.jobs {
-		jobs = append(jobs, k)
-	}
-	if len(jobs) != 20 {
-		t.Fatalf("%d jobs", len(jobs))
-	}
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(5)
-		go func() { defer wg.Done(); do("GET", "/api/me", "", c) }()
-		go func() { defer wg.Done(); do("GET", "/api/engineers", "", "") }()
-		go func() { defer wg.Done(); do("GET", "/api/engineers", "", "") }()
+		go func() { defer wg.Done(); do("GET", "/api/engineers", "") }()
+		go func() { defer wg.Done(); do("GET", "/api/engineers", "") }()
+		go func() { defer wg.Done(); do("POST", "/api/listing", `{"key":"`+key+`"}`) }()
 		go func(i int) {
 			defer wg.Done()
-			do("POST", "/api/me/jobs", `{"id":"`+jobs[i]+`","status":"accepted"}`, c)
+			do("POST", "/api/listing/save", `{"key":"`+key+`",`+strings.Replace(listing, `"rate":50`, fmt.Sprintf(`"rate":%d`, 50+i), 1)+`}`)
 		}(i)
-		go func(i int) { // the same job from another request, so a reply can be written while the job changes
+		go func() {
 			defer wg.Done()
-			for k := 0; k < 20; k++ {
-				do("POST", "/api/me/jobs", `{"id":"`+jobs[i]+`","status":"paid"}`, c)
-			}
-		}(i)
+			do("POST", "/api/jobs", `{"engineerId":"`+id+`","choice":"hourly","hours":2,"clientName":"C","clientEmail":"c@d.co","clientPhone":"5551234567","details":"0123456789ab"}`)
+		}()
 	}
 	wg.Wait()
+}
+
+// memMail keeps sent emails for tests.
+type memMail struct {
+	mu   sync.Mutex
+	sent []mail
+}
+
+func (m *memMail) Send(to, subject, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, mail{to, subject, text})
+	return nil
+}
+
+var editRe = regexp.MustCompile(`#edit=([0-9a-f-]+\.[A-Za-z0-9_-]{43})`)
+
+// key returns the edit key from the i-th email sent.
+func (m *memMail) key(t *testing.T, i int) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if i >= len(m.sent) {
+		t.Fatalf("only %d emails sent", len(m.sent))
+	}
+	k := editRe.FindStringSubmatch(m.sent[i].text)
+	if k == nil {
+		t.Fatalf("no edit link in %q", m.sent[i].text)
+	}
+	return k[1]
+}
+
+// No sign-in for engineers: a listing is managed with a private link sent to its email.
+func TestEditLinks(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	mm := &memMail{}
+	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test/")
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	call := func(route string, b B) Result { return a.routes[route](b, nil) }
+	if r := call("POST /api/engineers", engineerBody()); r.Status != 201 || r.Change != nil {
+		t.Fatalf("listing: %d %v", r.Status, r.Change)
+	}
+	if len(mm.sent) != 1 || mm.sent[0].to != "maya@example.com" || !strings.Contains(mm.sent[0].text, "https://codemarcer.test/#edit=") {
+		t.Fatalf("email: %+v", mm.sent)
+	}
+	key := mm.key(t, 0)
+	var e *Engineer
+	for _, x := range st.engineers {
+		e = x
+	}
+	if e.EditKey == "" || strings.Contains(e.EditKey, strings.Split(key, ".")[1]) {
+		t.Error("the link's secret is stored instead of its hash")
+	}
+	if r := call("POST /api/listing", B{"key": key}); r.Status != 200 || r.Body.(Engineer).EditKey != "" || r.Body.(Engineer).Phone != "(555) 123-4567" {
+		t.Errorf("open with the link: %d %+v", r.Status, r.Body)
+	}
+	for _, bad := range []any{nil, "", e.ID, e.ID + ".", e.ID + "." + strings.Repeat("A", 43), "x." + strings.Split(key, ".")[1], key + "x"} {
+		if r := call("POST /api/listing", B{"key": bad}); r.Status != 401 {
+			t.Errorf("key %q: %d", bad, r.Status)
+		}
+	}
+	if r := call("POST /api/listing/save", with(B{"key": "nope"}, "name", "")); r.Status != 401 {
+		t.Errorf("save with a wrong link and a bad body: %d, want 401 before validation", r.Status)
+	}
+	if r := call("POST /api/listing/save", with(with(engineerBody(), "key", key), "email", "thief@example.com")); r.Status != 200 || e.Email != "maya@example.com" {
+		t.Errorf("save: %d, email now %q", r.Status, e.Email)
+	}
+	// Listing the same email again doesn't make a second listing or say it exists; it sends a new link.
+	clock = clock.Add(11 * time.Minute)
+	if r := call("POST /api/engineers", with(engineerBody(), "name", "Someone Else")); r.Status != 201 || len(st.engineers) != 1 || e.Name != "Maya R." || len(mm.sent) != 2 {
+		t.Fatalf("listing a taken email: %d, %d listings, name %q, %d emails", r.Status, len(st.engineers), e.Name, len(mm.sent))
+	}
+	if call("POST /api/listing", B{"key": key}).Status != 401 || call("POST /api/listing", B{"key": mm.key(t, 1)}).Status != 200 {
+		t.Error("a new link didn't replace the old one")
+	}
+	// "Email me my link": the same answer for unknown emails, and at most one email per address per 10 minutes.
+	for _, email := range []string{"maya@example.com", "nobody@example.com", "MAYA@example.com"} {
+		if r := call("POST /api/edit-link", B{"email": email}); r.Status != 200 {
+			t.Errorf("%s: %d", email, r.Status)
+		}
+	}
+	if len(mm.sent) != 2 {
+		t.Errorf("%d emails: sent within 10 minutes of the last one, or to an unlisted address", len(mm.sent))
+	}
+	clock = clock.Add(11 * time.Minute)
+	call("POST /api/edit-link", B{"email": " Maya@Example.com "})
+	if len(mm.sent) != 3 {
+		t.Fatalf("%d emails after the gap", len(mm.sent))
+	}
+	if r := call("POST /api/listing/remove", B{"key": mm.key(t, 2)}); r.Status != 200 || len(st.engineers) != 0 || len(st.byEmail) != 0 {
+		t.Errorf("remove: %d, %d left", r.Status, len(st.engineers))
+	}
+}
+
+// The hire reply hands the client the engineer's contact and payment details.
+func TestHireShowsContact(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	a := NewAPI(st, t.TempDir(), &memMail{}, "https://codemarcer.test")
+	a.routes["POST /api/engineers"](engineerBody(), nil)
+	var id string
+	for k := range st.engineers {
+		id = k
+	}
+	r := a.routes["POST /api/jobs"](B{"engineerId": id, "choice": "p0", "clientName": "Ann", "clientEmail": "ann@example.com", "clientPhone": "5551234567", "details": "Login breaks after deploy."}, nil)
+	want := map[string]string{"name": "Maya R.", "email": "maya@example.com", "phone": "(555) 123-4567", "payWith": "Venmo @maya", "terms": "Upfront"}
+	if r.Status != 201 || !reflect.DeepEqual(r.Body.(map[string]any)["engineer"], want) {
+		t.Errorf("%d %+v", r.Status, r.Body)
+	}
+}
+
+// The email request to Azure Communication Services is signed the way the service checks it.
+func TestACSMailer(t *testing.T) {
+	var got *http.Request
+	var body []byte
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, body = r, must(io.ReadAll(r.Body))
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	m, err := newACS("endpoint="+srv.URL+"/;accesskey="+key, "DoNotReply@example.azurecomm.net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.client = srv.Client()
+	m.now = func() time.Time { return time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC) }
+	if err := m.Send("maya@example.com", "Subject", "Body text"); err != nil {
+		t.Fatal(err)
+	}
+	if got.URL.RequestURI() != "/emails:send?api-version=2023-03-31" || got.Header.Get("x-ms-date") != "Fri, 06 Nov 2026 12:00:00 GMT" {
+		t.Errorf("request %s, date %q", got.URL.RequestURI(), got.Header.Get("x-ms-date"))
+	}
+	sum := sha256.Sum256(body)
+	hash := base64.StdEncoding.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte("0123456789abcdef0123456789abcdef"))
+	mac.Write([]byte("POST\n/emails:send?api-version=2023-03-31\nFri, 06 Nov 2026 12:00:00 GMT;" + got.Host + ";" + hash))
+	if got.Header.Get("x-ms-content-sha256") != hash || got.Header.Get("Authorization") != "HMAC-SHA256 SignedHeaders=x-ms-date;host;x-ms-content-sha256&Signature="+base64.StdEncoding.EncodeToString(mac.Sum(nil)) {
+		t.Errorf("signature headers: %v", got.Header)
+	}
+	var sent struct {
+		SenderAddress string
+		Recipients    struct{ To []struct{ Address string } }
+		Content       struct{ Subject, PlainText string }
+	}
+	json.Unmarshal(body, &sent)
+	if sent.SenderAddress != "DoNotReply@example.azurecomm.net" || sent.Recipients.To[0].Address != "maya@example.com" || sent.Content.PlainText != "Body text" {
+		t.Errorf("body %s", body)
+	}
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) })
+	if m.Send("a@b.co", "s", "t") == nil {
+		t.Error("a refused email counted as sent")
+	}
+	for _, bad := range []string{"", "endpoint=http://x.example/;accesskey=" + key, "endpoint=https://x.example/;accesskey=not base64!"} {
+		if _, err := newACS(bad, "a@b.co"); err == nil {
+			t.Errorf("accepted connection string %q", bad)
+		}
+	}
+}
+
+// A live site must really send edit links.
+func TestRefusesAzureWithoutEmail(t *testing.T) {
+	if _, err := mailerFrom("codemarcer-1", "", ""); err == nil {
+		t.Error("started on App Service with emails only printed to the log")
+	}
+	if m, err := mailerFrom("", "", ""); err != nil || m == nil {
+		t.Error("refused the log mailer for local use")
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
 }
 
 func TestStoreRollsBackWhenTheWriteFails(t *testing.T) {
@@ -355,9 +514,9 @@ func TestStoreRollsBackWhenTheWriteFails(t *testing.T) {
 // A failed write answers 500 and leaves nothing half-done.
 func TestFailedWriteAnswers500(t *testing.T) {
 	st, _ := OpenStore(t.TempDir())
-	a := NewAPI(st, t.TempDir())
+	a := NewAPI(st, t.TempDir(), &memMail{}, "https://codemarcer.test")
 	st.write = func(string, []byte) error { return errors.New("disk full") }
-	if r := a.routes["POST /api/engineers"](engineerBody(), nil); r.Status != 500 || r.Change != nil || len(st.engineers) != 0 {
-		t.Errorf("sign-up on a full disk: status %d, session %v, %d engineers", r.Status, r.Change, len(st.engineers))
+	if r := a.routes["POST /api/engineers"](engineerBody(), nil); r.Status != 500 || len(st.engineers) != 0 || len(st.byEmail) != 0 {
+		t.Errorf("listing on a full disk: status %d, %d engineers", r.Status, len(st.engineers))
 	}
 }
