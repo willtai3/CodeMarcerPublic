@@ -4,9 +4,10 @@
 set -uo pipefail
 job="$1" out="${2:-}" repo="$GITHUB_REPOSITORY"
 run_url="$GITHUB_SERVER_URL/$repo/actions/runs/$GITHUB_RUN_ID"
-# The step that failed, read from this run's job list (each step is named "Step N: ...").
+# The step that failed, read from this run's job list (each step is named "Step N: ..."). GitHub may not have
+# recorded the failed step's result yet when this runs, so fall back to the first numbered step not yet marked success.
 step=$(gh api "repos/$repo/actions/runs/$GITHUB_RUN_ID/attempts/${GITHUB_RUN_ATTEMPT:-1}/jobs" \
-  --jq ".jobs[] | select(.name == \"$job\") | .steps[] | select(.conclusion == \"failure\") | .name" 2>/dev/null | head -n 1)
+  --jq ".jobs[] | select(.name == \"$job\") | [.steps[] | select(.name | startswith(\"Step \"))] | (map(select(.conclusion == \"failure\")) + map(select(.conclusion != \"success\" and .conclusion != \"skipped\")))[0].name // empty" 2>/dev/null | head -n 1)
 step="${step:-an unnamed step (see the run)}"
 
 {
