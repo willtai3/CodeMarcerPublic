@@ -16,7 +16,7 @@ const hire = (engineerId, extra = {}) => post(base, '/api/jobs', { engineerId, c
 const set = (body, c) => post(base, '/api/me/jobs', body, as(c));
 
 // The exact public surface. Any new route that answers without signing in must be added here on purpose.
-const PUBLIC = ['GET /', 'GET /admin', 'GET /app.js', 'GET /admin.js', 'GET /ui.js', 'GET /fees.js', 'GET /styles.css', 'GET /favicon.svg', 'GET /api/engineers', 'GET /api/pricing', 'POST /api/engineers', 'POST /api/login', 'POST /api/logout', 'POST /api/jobs', 'POST /api/admin/login', 'POST /api/admin/logout'];
+const PUBLIC = ['GET /', 'GET /admin', 'GET /app.js', 'GET /admin.js', 'GET /ui.js', 'GET /styles.css', 'GET /favicon.svg', 'GET /api/engineers', 'POST /api/engineers', 'POST /api/login', 'POST /api/logout', 'POST /api/jobs', 'POST /api/admin/login', 'POST /api/admin/logout'];
 
 test('public surface: every route in the Go source is either in the public list or answers 401 without a session', async () => {
   const [main, api] = await Promise.all(['../main.go', '../api.go'].map(f => readFile(new URL(f, import.meta.url), 'utf8')));
@@ -52,8 +52,8 @@ test('behind the host proxy, plain http redirects to https', async () => {
   } finally { await s.stop(); }
 });
 
-test('pricing reports free now and the later rate', async () => {
-  assert.deepEqual(await json(await get('/api/pricing')), { pct: 0, feePct: 10, promoEnd: Date.parse('2027-02-01T08:00:00Z') });
+test('no fees: there is no pricing endpoint or fee script', async () => {
+  for (const p of ['/api/pricing', '/fees.js']) assert.equal((await get(p)).status, 404, p);
 });
 
 test('requests: JSON only, size cap, bad JSON, other sites refused', async () => {
@@ -98,14 +98,15 @@ test('job flow: engineer sees the client contact, accepts → paid → complete 
   assert.ok(!('auth' in d.profile));
   assert.equal(d.jobs.length, 2, 'honeypot request not stored');
   const [hourly, pkg] = d.jobs;
-  assert.deepEqual([pkg.clientName, pkg.clientEmail, pkg.clientPhone, pkg.status, pkg.pct, hourly.quote], ['Ann', 'ann@example.com', '(555) 123-4567', 'requested', 0, 360]);
+  assert.deepEqual([pkg.clientName, pkg.clientEmail, pkg.clientPhone, pkg.status, hourly.quote], ['Ann', 'ann@example.com', '(555) 123-4567', 'requested', 360]);
 
   assert.equal((await set({ id: pkg.id, status: 'complete' }, mayaC)).status, 409, 'must accept first');
   assert.equal((await set({ id: pkg.id, status: 'accepted' }, mayaC)).status, 200);
   assert.equal((await set({ id: pkg.id, status: 'paid' }, mayaC)).status, 200);
   assert.equal((await set({ id: pkg.id, status: 'complete', amount: 'lots' }, mayaC)).status, 400);
   const done = await json(await set({ id: pkg.id, status: 'complete', amount: '450' }, mayaC));
-  assert.deepEqual([done.status, done.amount, done.fee, done.payout], ['complete', 450, 0, 450]);
+  assert.deepEqual([done.status, done.amount], ['complete', 450]);
+  assert.deepEqual(Object.keys(done).filter(k => /fee|pct|payout/i.test(k)), [], 'no fee on a completed job');
   assert.equal((await set({ id: pkg.id, status: 'accepted' }, mayaC)).status, 409, 'no going back');
   assert.equal((await set({ id: hourly.id, status: 'declined' }, mayaC)).status, 200);
   assert.equal((await set({ id: hourly.id, status: 'accepted' }, mayaC)).status, 409, 'declined is final');
@@ -143,7 +144,7 @@ test('staff roles: owner manages the team; admin sees money but not the team; mo
   const owner = await login(base);
   let d = await json(await get('/api/admin/data', owner));
   assert.deepEqual(d.me, { role: 'owner', perms: ['moderate', 'accounts', 'money', 'staff'] });
-  assert.deepEqual(d.totals, { requested: 2, completed: 1, billed: 450, fees: 0 });
+  assert.deepEqual(d.totals, { requested: 2, completed: 1, billed: 450 });
   assert.deepEqual(d.clients.map(c => [c.email, c.name, c.phone, c.jobs]), [['ann@example.com', 'Ann', '+1 555 987 6543', 2]], 'clients grouped by email, latest phone');
   assert.deepEqual([d.staff.length, d.engineers.find(e => e.name === 'Maya R.').jobs], [0, 2]);
   assert.ok(!d.engineers.some(e => 'auth' in e));

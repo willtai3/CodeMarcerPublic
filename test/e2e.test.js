@@ -25,14 +25,14 @@ const noSideScroll = page => page.evaluate(() => document.documentElement.scroll
 const fillAll = async (scope, values) => { for (const [name, v] of Object.entries(values)) await scope.locator(`[name="${name}"]`).fill(v); };
 const signIn = async (form, email, password) => { await fillAll(form, { email, password }); await form.getByRole('button', { name: 'Sign in' }).click(); };
 
-test('pricing tab: promo, calculator, tab survives reload', async () => {
-  const { page, done } = await open('/#pricing');
-  await page.getByText('Free until February 1, 2027').waitFor();
-  assert.match(await page.locator('#price-now').textContent(), /No fee on any job requested before February 1, 2027/);
-  await page.locator('#amount').fill('5000');
-  assert.equal(await page.locator('#calc-out').textContent(), 'Requested now: fee $0, engineer keeps $5,000. Requested from February 1, 2027: fee $500, engineer keeps $4,500.');
+test('no fees: said up front, no pricing tab, tab survives reload', async () => {
+  const { page, done } = await open('/#engineers');
+  assert.equal(await page.locator('.badge').textContent(), 'No fees');
+  assert.match(await page.locator('.lead').textContent(), /CodeMarcer takes no fee from either side\./);
+  assert.equal(await page.getByRole('tab', { name: 'Pricing' }).count(), 0);
+  assert.ok(!/\b\d+% fee|fees owed|free until/i.test(await page.locator('body').textContent()), 'no fee wording anywhere');
   await page.reload();
-  assert.equal(await page.locator('#pricing').isVisible(), true);
+  assert.equal(await page.locator('#engineers').isVisible(), true);
   await done();
 });
 
@@ -93,7 +93,7 @@ test('client hires without an account: search, cancel, hourly quote, name/email/
   await c.getByRole('button', { name: 'Hire by the hour' }).click();
   const form = c.locator('form.hire');
   assert.equal(await form.locator('[type="password"]').count(), 0, 'no password field');
-  await page.getByRole('tab', { name: 'Pricing' }).click(); await page.getByRole('tab', { name: 'Find an engineer' }).click();
+  await page.getByRole('tab', { name: 'For engineers' }).click(); await page.getByRole('tab', { name: 'Find an engineer' }).click();
   await page.waitForTimeout(300);
   assert.equal(await form.count(), 1, 'hire form survives reopening the tab');
   await form.locator('[name="hours"]').fill('3');
@@ -141,7 +141,7 @@ test('engineer dashboard: accept, mark paid, complete with cancel, edit profile,
   await job.getByRole('button', { name: 'Mark complete' }).click();
   await job.getByLabel('Final amount in USD').fill('450');
   await job.getByRole('button', { name: 'Confirm complete' }).click();
-  await job.getByText('Completed for $450. No fee: requested during the free period.').waitFor();
+  await job.getByText('Completed for $450.', { exact: true }).waitFor();
   assert.equal(await job.getByRole('button').count(), 0, 'no actions after complete');
 
   const f = page.locator('#profile');
@@ -186,12 +186,12 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await page.getByText('Wrong email or password.').waitFor();
   await page.getByLabel('Password').fill(ADMIN.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByText('Signed in as Owner. 1 engineer listed. 2 job requests, 1 completed for $450. Fees owed: $0.').waitFor();
+  await page.getByText('Signed in as Owner. 1 engineer listed. 2 job requests, 1 completed for $450.').waitFor();
   for (const t of ['Engineers', 'Clients', 'Jobs', 'Team']) assert.equal(await page.getByRole('tab', { name: t }).isVisible(), true, t);
 
   await page.getByRole('tab', { name: 'Jobs' }).click();
   const completed = page.locator('#ledger tbody tr', { hasText: 'Complete' });
-  assert.match(await completed.textContent(), /ann@example\.com\+1 555 987 6543Complete\$450\$0$/, `default columns: key columns plus amount and fee; row was "${await completed.textContent()}"`);
+  assert.match(await completed.textContent(), /ann@example\.com\+1 555 987 6543Complete\$450$/, `default columns: key columns plus the final amount; row was "${await completed.textContent()}"`);
   // Columns menu: Work is opt-in; turning it on shows it and is remembered after a reload.
   assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
   await page.locator('#ledger summary', { hasText: 'Columns' }).click();
@@ -264,7 +264,7 @@ test('phone: no sideways scroll on every tab and the hire form; screenshots', as
   await page.getByRole('button', { name: 'Hire by the hour' }).first().click();
   assert.equal(await noSideScroll(page), true, 'hire form');
   await shot(page, 'phone-find');
-  for (const tab of ['engineers', 'pricing']) {
+  for (const tab of ['engineers']) {
     await page.locator(`[data-tab=${tab}]`).click();
     assert.equal(await noSideScroll(page), true, tab);
     await shot(page, 'phone-' + tab);

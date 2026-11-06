@@ -1,5 +1,4 @@
-import { $, $$, h, api, tabs, date } from './ui.js';
-import { usd } from './fees.js';
+import { $, $$, h, api, tabs, date, usd } from './ui.js';
 
 const status = (t = '', err = false) => { $('#status').className = 'msg' + (err ? ' error' : ''); $('#status').textContent = t; };
 const a = (href, text) => h('a', { href, textContent: text, rel: 'noopener noreferrer', target: '_blank' });
@@ -59,7 +58,7 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
   const has = p => me.perms.includes(p);
   for (const b of $$('#app [data-perm]')) b.hidden = !has(b.dataset.perm);
   if ($(`#app [data-tab="${location.hash.slice(1)}"]`)?.hidden !== false) showTab($('#app [data-tab]:not([hidden])').dataset.tab);
-  $('#summary').textContent = `Signed in as ${ROLE[me.role]}. ${plural(engineers.length, 'engineer')} listed.` + (totals ? ` ${plural(totals.requested, 'job request')}, ${totals.completed} completed for ${usd(totals.billed)}. Fees owed: ${usd(totals.fees)}.` : '');
+  $('#summary').textContent = `Signed in as ${ROLE[me.role]}. ${plural(engineers.length, 'engineer')} listed.` + (totals ? ` ${plural(totals.requested, 'job request')}, ${totals.completed} completed for ${usd(totals.billed)}.` : '');
 
   $('#roster').replaceChildren(list('engineers', [
     { label: 'Engineer', always: true, cell: e => contactCell(e, h('p', { className: 'meta', textContent: e.headline })) },
@@ -89,7 +88,6 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
     { label: 'Work', cell: j => j.choice.type === 'hourly' ? `${j.choice.hours} hours at ${usd(j.choice.rate)}/hour` : j.choice.title },
     { label: 'Quote', cell: j => usd(j.quote) },
     { label: 'Final amount', on: true, cell: j => j.amount == null ? '' : usd(j.amount) },
-    { label: 'Fee', on: true, cell: j => j.fee == null ? (j.pct ? `${j.pct}% when complete` : 'Free') : usd(j.fee) },
   ], jobs, 'No job requests yet.'));
 
   if (staff) {

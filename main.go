@@ -31,7 +31,7 @@ import (
 var publicFS embed.FS
 
 // The complete public surface of pages and assets (test/api.test.js reads this list).
-var files = map[string]string{"/": "index.html", "/admin": "admin.html", "/app.js": "app.js", "/admin.js": "admin.js", "/ui.js": "ui.js", "/fees.js": "fees.js", "/styles.css": "styles.css", "/favicon.svg": "favicon.svg"}
+var files = map[string]string{"/": "index.html", "/admin": "admin.html", "/app.js": "app.js", "/admin.js": "admin.js", "/ui.js": "ui.js", "/styles.css": "styles.css", "/favicon.svg": "favicon.svg"}
 
 var types = map[string]string{"html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8", "css": "text/css; charset=utf-8", "svg": "image/svg+xml"}
 

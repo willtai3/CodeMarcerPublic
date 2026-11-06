@@ -67,23 +67,20 @@ type Choice struct {
 
 // A job is a client's request to one engineer. Clients have no account: their contact details live on the job.
 type Job struct {
-	ID          string   `json:"id"`
-	Kind        string   `json:"kind"`
-	Created     string   `json:"created"`
-	EngineerID  string   `json:"engineerId"`
-	ClientName  string   `json:"clientName"`
-	ClientEmail string   `json:"clientEmail"`
-	ClientPhone string   `json:"clientPhone"`
-	Details     string   `json:"details"`
-	Link        *string  `json:"link"`
-	Choice      Choice   `json:"choice"`
-	Quote       int      `json:"quote"`
-	Pct         int      `json:"pct"`
-	Status      string   `json:"status"`
-	Amount      *int     `json:"amount"`
-	Fee         *float64 `json:"fee"`
-	Payout      *float64 `json:"payout"`
-	Completed   *string  `json:"completed,omitempty"`
+	ID          string  `json:"id"`
+	Kind        string  `json:"kind"`
+	Created     string  `json:"created"`
+	EngineerID  string  `json:"engineerId"`
+	ClientName  string  `json:"clientName"`
+	ClientEmail string  `json:"clientEmail"`
+	ClientPhone string  `json:"clientPhone"`
+	Details     string  `json:"details"`
+	Link        *string `json:"link"`
+	Choice      Choice  `json:"choice"`
+	Quote       int     `json:"quote"`
+	Status      string  `json:"status"`
+	Amount      *int    `json:"amount"`
+	Completed   *string `json:"completed,omitempty"`
 }
 
 // Store keeps every record in memory, indexed by kind (and engineers by email), and writes the whole set to

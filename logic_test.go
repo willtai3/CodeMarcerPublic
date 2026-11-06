@@ -7,53 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
-
-func TestFees(t *testing.T) {
-	pst := time.FixedZone("PST", -8*3600)
-	for _, c := range []struct {
-		at   time.Time
-		want int
-	}{
-		{time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC), 0},
-		{time.Date(2027, 1, 31, 23, 59, 59, 0, pst), 0},
-		{time.Date(2027, 2, 1, 0, 0, 0, 0, pst), feePct},
-	} {
-		if got := pctAt(c.at); got != c.want {
-			t.Errorf("pctAt(%v) = %d, want %d", c.at, got, c.want)
-		}
-	}
-	for _, c := range []struct {
-		amount, pct int
-		fee, payout float64
-	}{{5000, 10, 500, 4500}, {1234, 10, 123.4, 1110.6}, {999, 0, 0, 999}} {
-		if fee, payout := feeFor(c.amount, c.pct); fee != c.fee || payout != c.payout {
-			t.Errorf("feeFor(%d, %d) = %v, %v; want %v, %v", c.amount, c.pct, fee, payout, c.fee, c.payout)
-		}
-	}
-}
-
-// The page shows fees from public/fees.js; it must say the same as the server.
-func TestFeeRulesMatchThePage(t *testing.T) {
-	js, err := os.ReadFile("public/fees.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := regexp.MustCompile(`PROMO_END = Date\.UTC\((\d+), (\d+), (\d+), (\d+)\), FEE_PCT = (\d+)`).FindStringSubmatch(string(js))
-	if m == nil {
-		t.Fatal("fees.js: PROMO_END/FEE_PCT line not found")
-	}
-	want := []string{"2027", "1", "1", "8", "10"} // Date.UTC months are 0-based: 1 = February
-	got := m[1:]
-	if !reflect.DeepEqual(got, want) || promoEnd != time.Date(2027, 2, 1, 8, 0, 0, 0, time.UTC) || feePct != 10 {
-		t.Errorf("fees.js says %v; server says %v and %d%%", got, promoEnd, feePct)
-	}
-}
 
 func TestTags(t *testing.T) {
 	if got := tags("React.js, NodeJS ,node,  Next , "); !reflect.DeepEqual(got, []string{"react", "node", "next.js"}) {
@@ -391,41 +349,6 @@ func TestStoreRollsBackWhenTheWriteFails(t *testing.T) {
 	}
 	if fi, _ := os.Stat(st.file); fi.Mode().Perm() != 0o600 {
 		t.Errorf("store.json mode %v", fi.Mode().Perm())
-	}
-}
-
-// After Feb 1, 2027 the fee is fixed when the client sends the request and charged on completion.
-func TestFeeLockedAtRequestTime(t *testing.T) {
-	st, _ := OpenStore(t.TempDir())
-	a := NewAPI(st, t.TempDir())
-	clock := time.Date(2027, 1, 31, 12, 0, 0, 0, time.UTC)
-	a.now = func() time.Time { return clock }
-	res := a.routes["POST /api/engineers"](engineerBody(), nil)
-	if res.Status != 201 {
-		t.Fatalf("sign-up: %d %v", res.Status, res.Body)
-	}
-	me := res.Change.Login
-	hire := func(who string) {
-		r := a.routes["POST /api/jobs"](B{"engineerId": me.ID, "choice": "p0", "clientName": who, "clientEmail": who + "@example.com", "clientPhone": "555 123 4567", "details": "Please deploy my app."}, nil)
-		if r.Status != 201 {
-			t.Fatalf("hire: %d %v", r.Status, r.Body)
-		}
-	}
-	hire("early")
-	clock = time.Date(2027, 2, 2, 0, 0, 0, 0, time.UTC)
-	hire("late")
-	for _, j := range st.jobs {
-		for _, to := range []string{"accepted", "complete"} {
-			if r := a.routes["POST /api/me/jobs"](B{"id": j.ID, "status": to, "amount": "1000"}, me); r.Status != 200 {
-				t.Fatalf("%s: %d %v", to, r.Status, r.Body)
-			}
-		}
-	}
-	for _, j := range st.jobs {
-		want := map[string]float64{"early": 0, "late": 100}[j.ClientName]
-		if *j.Fee != want || *j.Payout != 1000-want {
-			t.Errorf("%s: fee %v payout %v, want fee %v", j.ClientName, *j.Fee, *j.Payout, want)
-		}
 	}
 }
 
