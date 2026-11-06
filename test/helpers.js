@@ -38,4 +38,9 @@ export const post = (base, path, body, headers = {}) => fetch(base + path, { met
 export const cookieOf = r => r.headers.get('set-cookie').split(';')[0];
 export const login = async base => cookieOf(await post(base, '/api/admin/login', ADMIN));
 
-export const ENGINEER = { name: 'Maya R.', email: 'maya@example.com', password: 'maya password 1', headline: 'I take AI-built web apps to production', skills: 'Next, Supabase, Stripe, React', rate: '120', packages: [{ title: 'Deploy your app with HTTPS', price: '400', days: '5', details: 'Hosting, domain and HTTPS' }], payWith: 'Venmo @maya-r', terms: 'Half upfront, half on completion', portfolio: 'https://github.com/maya', about: '', available: true };
+// Running locally, emails are written to the server log. keyFor returns the edit key from the latest one sent to email
+// (the part after #edit= in the link), or null.
+export const keyFor = (srv, email) => [...srv.stderr().matchAll(/mail to (\S+): [^\n]*\n[\s\S]*?#edit=([0-9a-f-]+\.[A-Za-z0-9_-]{43})/g)].filter(m => m[1] === email).at(-1)?.[2] ?? null;
+export const mailsTo = (srv, email) => [...srv.stderr().matchAll(/mail to (\S+):/g)].filter(m => m[1] === email).length;
+
+export const ENGINEER = { name: 'Maya R.', email: 'maya@example.com', phone: '(555) 010-2030', headline: 'I take AI-built web apps to production', skills: 'Next, Supabase, Stripe, React', rate: '120', packages: [{ title: 'Deploy your app with HTTPS', price: '400', days: '5', details: 'Hosting, domain and HTTPS' }], payWith: 'Venmo @maya-r', terms: 'Half upfront, half on completion', portfolio: 'https://github.com/maya', about: '', available: true };

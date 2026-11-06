@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-// Records. JSON field names are what the pages read; `auth` never leaves the server (see the view types in api.go).
+// Records. JSON field names are what the pages read; `auth` and `editKey` never leave the server (see the view types in api.go).
 
 type Hash struct {
 	Alg  string `json:"alg"`
@@ -31,6 +31,7 @@ type Engineer struct {
 	Created   string    `json:"created"`
 	Name      string    `json:"name"`
 	Email     string    `json:"email"`
+	Phone     string    `json:"phone"`
 	Headline  string    `json:"headline"`
 	Skills    []string  `json:"skills"`
 	Rate      *int      `json:"rate"`
@@ -41,8 +42,7 @@ type Engineer struct {
 	About     *string   `json:"about"`
 	Available bool      `json:"available"`
 	Hidden    bool      `json:"hidden"`
-	Auth      *Hash     `json:"auth,omitempty"`
-	AuthVer   int       `json:"authVer,omitempty"` // goes up on each password change or reset; older sessions stop working
+	EditKey   string    `json:"editKey,omitempty"` // SHA-256 of the private edit link's secret; a new link replaces it
 }
 
 type Staff struct {
@@ -78,9 +78,6 @@ type Job struct {
 	Link        *string `json:"link"`
 	Choice      Choice  `json:"choice"`
 	Quote       int     `json:"quote"`
-	Status      string  `json:"status"`
-	Amount      *int    `json:"amount"`
-	Completed   *string `json:"completed,omitempty"`
 }
 
 // Store keeps every record in memory, indexed by kind (and engineers by email), and writes the whole set to
@@ -197,6 +194,13 @@ func (s *Store) commit(undo func()) error {
 func (s *Store) addEngineer(e *Engineer) error {
 	s.engineers[e.ID], s.byEmail[e.Email] = e, e
 	return s.commit(func() { delete(s.engineers, e.ID); delete(s.byEmail, e.Email) })
+}
+
+// removeEngineer deletes a listing; their past requests stay in the ledger under "(removed)".
+func (s *Store) removeEngineer(e *Engineer) error {
+	delete(s.engineers, e.ID)
+	delete(s.byEmail, e.Email)
+	return s.commit(func() { s.engineers[e.ID], s.byEmail[e.Email] = e, e })
 }
 
 func (s *Store) addStaff(x *Staff) error {

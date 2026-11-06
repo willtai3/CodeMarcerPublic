@@ -1,6 +1,6 @@
 // CodeMarcer server: one binary with the pages built in.
 //
-//	codemarcer          run the site (PORT, HOST, DATA_DIR, TRUST_PROXY)
+//	codemarcer          run the site (PORT, HOST, DATA_DIR, TRUST_PROXY, SITE_URL, ACS_CONNECTION_STRING, MAIL_FROM)
 //	codemarcer admin    create or replace the owner email and password
 package main
 
@@ -53,29 +53,29 @@ const maxBody = 32 << 10
 // buckets before it runs, so a burst of parallel requests can't all slip under the limit; afterwards the place is given
 // back if keep says that answer doesn't count.
 //   - "s": new listings and hire requests, counted only when accepted.
-//   - "h": anything that hashes a new password (sign-up, a password change), counted unless refused before hashing.
-//   - "l": sign-ins, every attempt.
+//   - "m": "email me my edit link", every attempt (each address also gets at most one link per 10 minutes).
+//   - "k": anything that checks an edit link, every attempt.
+//   - "l": staff sign-ins, every attempt.
 type limit struct {
 	bucket string
 	max    int
 	per    time.Duration
 	keep   func(status int) bool
-	when   func(b B) bool // nil: every request on the route
 }
 
 var (
 	always   = func(int) bool { return true }
 	accepted = func(code int) bool { return code < 300 }
-	hashed   = func(code int) bool { return code != 400 && code != 401 } // 400 and 401 are answered before any hashing
-	newPass  = func(b B) bool { pw, _ := b["password"].(string); return pw != "" }
 )
 
 var limits = map[string][]limit{
-	"POST /api/engineers":   {{"s", 10, time.Hour, accepted, nil}, {"h", 20, time.Hour, hashed, nil}},
-	"POST /api/jobs":        {{"s", 10, time.Hour, accepted, nil}},
-	"POST /api/me":          {{"h", 20, time.Hour, hashed, newPass}},
-	"POST /api/login":       {{"l", 10, 15 * time.Minute, always, nil}},
-	"POST /api/admin/login": {{"l", 10, 15 * time.Minute, always, nil}},
+	"POST /api/engineers":      {{"s", 10, time.Hour, accepted}},
+	"POST /api/jobs":           {{"s", 10, time.Hour, accepted}},
+	"POST /api/edit-link":      {{"m", 10, time.Hour, always}},
+	"POST /api/listing":        {{"k", 60, 15 * time.Minute, always}},
+	"POST /api/listing/save":   {{"k", 60, 15 * time.Minute, always}},
+	"POST /api/listing/remove": {{"k", 60, 15 * time.Minute, always}},
+	"POST /api/admin/login":    {{"l", 10, 15 * time.Minute, always}},
 }
 
 type server struct {
@@ -254,9 +254,7 @@ func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip, now := ipKey(sv.clientIP(r)), time.Now()
 	held, trap := []limit{}, false
 	for _, l := range limits[route] {
-		if l.when == nil || l.when(b) {
-			held, trap = append(held, l), trap || l.bucket == "s"
-		}
+		held, trap = append(held, l), trap || l.bucket == "s"
 	}
 	sv.mu.Lock()
 	for _, l := range held {
@@ -303,6 +301,18 @@ func proxyProblem(site, trust string) string {
 	return ""
 }
 
+// mailerFrom: Azure Communication Services when ACS_CONNECTION_STRING is set; otherwise emails are printed to the log,
+// which is only allowed off App Service (a live site must really send edit links).
+func mailerFrom(site, conn, from string) (Mailer, error) {
+	if conn != "" {
+		return newACS(conn, from)
+	}
+	if site != "" {
+		return nil, errors.New("Running on Azure App Service without ACS_CONNECTION_STRING and MAIL_FROM: engineers would never get their edit links.")
+	}
+	return logMailer{}, nil
+}
+
 func env(k, fallback string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -322,11 +332,15 @@ func main() {
 	if msg := proxyProblem(os.Getenv("WEBSITE_SITE_NAME"), os.Getenv("TRUST_PROXY")); msg != "" {
 		log.Fatal(msg)
 	}
+	m, err := mailerFrom(os.Getenv("WEBSITE_SITE_NAME"), os.Getenv("ACS_CONNECTION_STRING"), os.Getenv("MAIL_FROM"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	st, err := OpenStore(dataDir)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	sv := &server{api: NewAPI(st, dataDir), static: map[string][]byte{}, trustProxy: os.Getenv("TRUST_PROXY") == "1", hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
+	sv := &server{api: NewAPI(st, dataDir, m, env("SITE_URL", "https://codemarcer.com")), static: map[string][]byte{}, trustProxy: os.Getenv("TRUST_PROXY") == "1", hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
 	for route, name := range files {
 		if sv.static[route], err = publicFS.ReadFile("public/" + name); err != nil {
 			log.Fatalf("missing page %s: %v", name, err)

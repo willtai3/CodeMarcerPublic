@@ -20,7 +20,7 @@
   <ol class="steps">
     <li>Find an engineer whose skills fit your app.</li>
     <li>Choose a package or hourly work and send your request.</li>
-    <li>They contact you by email or phone, you pay them directly, and they mark the job complete.</li>
+    <li>You get their email and phone right away. Agree the details and pay them directly.</li>
   </ol>
 
   <nav class="tabs" role="tablist" aria-label="Sections">
@@ -34,32 +34,14 @@
   </section>
 
   <section role="tabpanel" id="engineers" hidden>
-    <div data-show="out" class="stack">
-      <form id="signin" class="signin" novalidate>
-        <p>Already listed? Sign in to see your requests and edit your profile.</p>
-        <div class="row">
-          <label>Email<input name="email" type="email" required autocomplete="username"></label>
-          <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
-        </div>
-        <button class="primary">Sign in</button>
-        <p class="msg" role="status"></p>
-      </form>
-    </div>
-    <div data-show="engineer" class="stack" hidden>
-      <div class="row-between"><span class="who" id="who"></span><button class="quiet signout" type="button">Sign out</button></div>
-      <ul class="jobs" id="jobs"></ul>
-    </div>
+    <div class="row-between" id="editing" hidden><span id="who"></span><button class="quiet" type="button" id="stop-edit">Done</button></div>
 
-    <form id="profile" data-show="out engineer" novalidate>
+    <form id="profile" novalidate>
       <p id="profile-intro"></p>
       <label>Your name<input name="name" required maxlength="80" autocomplete="name"></label>
-      <div class="row" data-signup>
-        <label>Email<input name="email" type="email" maxlength="120" autocomplete="email"></label>
-        <label>Password, 10+ characters<input name="password" type="password" maxlength="200" autocomplete="new-password"></label>
-      </div>
-      <div class="row" data-edit hidden>
-        <label>New password, leave blank to keep it (optional)<input name="newPassword" type="password" maxlength="200" autocomplete="new-password"></label>
-        <label>Current password, needed to change it<input name="currentPassword" type="password" maxlength="200" autocomplete="current-password"></label>
+      <div class="row">
+        <label>Email<input name="email" type="email" required maxlength="120" autocomplete="email"></label>
+        <label>Phone<input name="phone" type="tel" required maxlength="25" autocomplete="tel" placeholder="(555) 123-4567"></label>
       </div>
       <label>Headline<input name="headline" required maxlength="80" placeholder="I take AI-built web apps to production"></label>
       <label>Skills, separated by commas<input name="skills" required list="stacks" placeholder="next.js, supabase, stripe, aws"></label>
@@ -73,8 +55,17 @@
       <label>About you (optional)<textarea name="about" maxlength="1000" rows="4"></textarea></label>
       <label class="check"><input type="checkbox" name="available" checked>Taking new work</label>
       <input class="trap" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
-      <p class="note" data-signup>Your profile goes live right away. Your email and how you get paid are shown only to clients who send you a request.</p>
-      <button class="primary" id="profile-save"></button>
+      <p class="note" data-new>No account or password. Your listing goes live right away, and we email you a private link to edit or remove it. Your email, phone and how you get paid are shown only to clients who send you a request.</p>
+      <div class="inline wrap"><button class="primary" id="profile-save"></button><span id="remove-slot" data-edit hidden></span></div>
+      <p class="msg" role="status"></p>
+    </form>
+
+    <form id="relink" class="stack" novalidate data-new>
+      <p>Already listed? We'll email you a new private link to edit or remove your listing.</p>
+      <div class="row">
+        <label>Email<input name="email" type="email" required maxlength="120" autocomplete="email"></label>
+      </div>
+      <button class="primary">Email me my edit link</button>
       <p class="msg" role="status"></p>
     </form>
   </section>

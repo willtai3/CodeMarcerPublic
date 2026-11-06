@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
-import { start, ADMIN } from './helpers.js';
+import { start, post, keyFor, ADMIN, ENGINEER } from './helpers.js';
 
 const { chromium } = createRequire(import.meta.url)('playwright');
 const SHOTS = process.env.SHOTS; // folder for screenshots, optional
@@ -11,7 +11,7 @@ before(async () => { srv = await start(); browser = await chromium.launch(); SHO
 after(async () => { await browser?.close(); await srv?.stop(); });
 
 // Every page gets: outside requests blocked and recorded, console errors (incl. CSP violations) recorded.
-// A signed-out page load asks /api/me and gets the expected 401, so that one message is always allowed.
+// The admin page asks for its data on load and gets the expected 401 when signed out, so that message is allowed.
 const open = async (path, opts = {}) => {
   const ctx = await browser.newContext(opts), page = await ctx.newPage(), outside = [], errors = [];
   await ctx.route('**', r => { const u = new URL(r.request().url()); return u.origin === new URL(srv.base).origin ? r.continue() : (outside.push(u.href), r.abort()); });
@@ -23,7 +23,6 @@ const open = async (path, opts = {}) => {
 const shot = (page, name) => SHOTS && page.screenshot({ path: `${SHOTS}/${name}.png`, fullPage: true });
 const noSideScroll = page => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
 const fillAll = async (scope, values) => { for (const [name, v] of Object.entries(values)) await scope.locator(`[name="${name}"]`).fill(v); };
-const signIn = async (form, email, password) => { await fillAll(form, { email, password }); await form.getByRole('button', { name: 'Sign in' }).click(); };
 
 test('no fees: said up front, no pricing tab, tab survives reload', async () => {
   const { page, done } = await open('/#engineers');
@@ -36,15 +35,16 @@ test('no fees: said up front, no pricing tab, tab survives reload', async () => 
   await done();
 });
 
-test('engineer lists themselves: wrong sign-in, pricing required, add and remove packages, live at once', async () => {
+test('engineer lists themselves with email and phone, no password: pricing required, add and remove packages, live at once', async () => {
   const { page, done } = await open('/#engineers');
-  const signin = page.locator('#signin');
-  await signIn(signin, 'nobody@example.com', 'wrong password!');
-  await signin.getByText('Wrong email or password.').waitFor();
-
   const f = page.locator('#profile');
+  assert.equal(await page.locator('#engineers [type="password"]').count(), 0, 'no password anywhere');
+  assert.equal(await page.getByRole('button', { name: 'Sign in' }).count(), 0, 'no sign-in');
   assert.equal(await f.locator('.pkg').count(), 1, 'one empty package row to start');
-  await fillAll(f, { name: 'Maya R.', email: 'maya@example.com', password: 'maya password 1', headline: 'I take AI-built web apps to production', skills: 'next, supabase, stripe', payWith: 'Venmo @maya-r' });
+  await fillAll(f, { name: 'Maya R.', email: 'maya@example.com', phone: '12345', headline: 'I take AI-built web apps to production', skills: 'next, supabase, stripe', payWith: 'Venmo @maya-r' });
+  await f.getByRole('button', { name: 'List me' }).click();
+  await f.getByText('Check the phone.').waitFor();
+  await f.locator('[name="phone"]').fill('(555) 010-2030');
   await f.getByRole('button', { name: 'List me' }).click();
   await f.getByText('Add an hourly rate or at least one package.').waitFor();
   await fillAll(f, { 'pkg-title': 'Deploy your app with HTTPS', 'pkg-price': '10', 'pkg-days': '5' });
@@ -64,9 +64,9 @@ test('engineer lists themselves: wrong sign-in, pricing required, add and remove
   await shot(page, 'desktop-signup');
 
   await f.getByRole('button', { name: 'List me' }).click(); // empty extra rows are dropped
-  await page.getByText("Signed in as Maya R. (maya@example.com). No open requests. You're listed.").waitFor();
-  assert.equal(await f.getByRole('button', { name: 'Save profile' }).isVisible(), true);
-  assert.equal(await f.locator('[name="email"]').isHidden(), true, 'email fixed after signup');
+  await f.getByText(/^You're listed\. We've emailed a private link to edit or remove your listing to maya@example\.com\./).waitFor();
+  assert.equal(await f.locator('[name="name"]').inputValue(), '', 'the form is cleared for the next person');
+  assert.ok(keyFor(srv, 'maya@example.com'), 'the edit link was emailed');
 
   await page.getByRole('tab', { name: 'Find an engineer' }).click();
   await page.locator('.card', { hasText: 'Maya R.' }).waitFor();
@@ -110,8 +110,7 @@ test('client hires without an account: search, cancel, hourly quote, name/email/
   await c.getByText('Request sent to Maya R.').waitFor();
   assert.equal((await c.locator('.done').textContent()).includes('R..'), false, 'no double period after a name ending in a dot');
   const confirm = await c.locator('.done').textContent();
-  assert.match(confirm, /Quote \$360\.They have your email and phone and will contact you to agree the details and how to pay\. Payment terms: half upfront, half on completion\./);
-  assert.ok(!confirm.includes('maya@example.com') && !confirm.includes('Venmo'), "the engineer's email and payment handle aren't shown to whoever sends a request");
+  assert.match(confirm, /Quote \$360\.Contact them to agree the details: maya@example\.com · \(555\) 010-2030They take payment by Venmo @maya-r\. Payment terms: half upfront, half on completion\.They also have your email and phone\./);
   await shot(page, 'desktop-hired');
 
   await page.locator('#q').fill('');
@@ -122,60 +121,53 @@ test('client hires without an account: search, cancel, hourly quote, name/email/
   await done(/status of 400/);
 });
 
-test('engineer dashboard: accept, mark paid, complete with cancel, edit profile, sign out', async () => {
-  const { page, done } = await open('/#engineers');
-  await signIn(page.locator('#signin'), 'maya@example.com', 'maya password 1');
-  await page.locator('#who', { hasText: /Signed in as Maya R\..*2 open requests\./ }).waitFor();
-  const job = page.locator('#jobs .job', { hasText: 'Ann ·' }).filter({ hasText: 'Deploy your app' });
-  assert.match(await job.textContent(), /Deploy your app with HTTPS · quote \$400ann@example\.com · \+1 555 987 6543/);
-  await shot(page, 'desktop-dashboard');
-  const hourly = page.locator('#jobs .job', { hasText: '3 hours' });
-  await hourly.getByRole('button', { name: 'Decline' }).click();
-  await page.locator('#jobs .job', { hasText: '3 hours' }).getByText('Declined').waitFor();
-
-  await job.getByRole('button', { name: 'Accept' }).click();
-  await job.getByRole('button', { name: 'Mark paid' }).click();
-  await job.locator('.status', { hasText: 'Paid' }).waitFor();
-  await job.getByRole('button', { name: 'Mark complete' }).click();
-  await job.getByRole('button', { name: 'Cancel' }).click();
-  await job.getByRole('button', { name: 'Mark complete' }).click();
-  await job.getByLabel('Final amount in USD').fill('450');
-  await job.getByRole('button', { name: 'Confirm complete' }).click();
-  await job.getByText('Completed for $450.', { exact: true }).waitFor();
-  assert.equal(await job.getByRole('button').count(), 0, 'no actions after complete');
-
+test('edit link: opens the listing, leaves the address bar, saves, emails a new link; a bad link says so; remove with confirm', async () => {
+  const { page, done } = await open('/#edit=' + keyFor(srv, 'maya@example.com'));
+  await page.getByText('Editing the listing for Maya R. (maya@example.com).').waitFor();
+  assert.equal(new URL(page.url()).hash, '#engineers', 'the secret is taken out of the address bar');
   const f = page.locator('#profile');
+  assert.equal(await f.locator('[name="email"]').getAttribute('readonly'), '', 'the email is fixed');
+  assert.equal(await f.locator('[name="phone"]').inputValue(), '(555) 010-2030');
+  assert.equal(await page.locator('#relink').isHidden(), true);
+  await shot(page, 'desktop-edit');
   await f.locator('[name="headline"]').fill('Production-ready AI apps in a week');
   await f.locator('[name="available"]').uncheck();
-  await f.getByRole('button', { name: 'Save profile' }).click();
-  await page.getByText(/Profile saved\./).waitFor();
+  await f.getByRole('button', { name: 'Save changes' }).click();
+  await f.getByText('Saved. Clients see the change now.').waitFor();
   await page.getByRole('tab', { name: 'Find an engineer' }).click();
   const card = page.locator('.card', { hasText: 'Maya R.' });
   await card.getByText(/Not taking new work right now/).waitFor();
   assert.equal(await card.getByRole('button').count(), 0, 'no hire buttons while unavailable');
   await page.getByRole('tab', { name: 'For engineers' }).click();
   await f.locator('[name="available"]').check();
-  // Wait for this save to finish: "Profile saved." is still on the page from the last one, and a save clears the password fields.
-  await Promise.all([page.waitForResponse(r => r.url().endsWith('/api/engineers') && r.request().method() === 'GET'), f.getByRole('button', { name: 'Save profile' }).click()]);
-  await page.getByText(/Profile saved\./).waitFor();
-  await f.getByRole('button', { name: 'Save profile' }).and(page.locator(':enabled')).waitFor(); // enabled again only once the save is done
-  // A new password needs the current one.
-  await f.locator('[name="newPassword"]').fill('maya new password');
-  await f.locator('[name="currentPassword"]').fill('not my password');
-  await f.getByRole('button', { name: 'Save profile' }).click();
-  await f.getByText('Your current password is wrong.').waitFor();
-  assert.equal(await f.locator('[name="currentPassword"]').getAttribute('aria-invalid'), 'true');
-  await f.locator('[name="currentPassword"]').fill('maya password 1');
-  await f.getByRole('button', { name: 'Save profile' }).click();
-  await page.waitForFunction(() => document.querySelector('#profile [name="currentPassword"]').value === '');
-  await page.locator('#engineers .signout').click();
-  await page.getByRole('button', { name: 'List me' }).waitFor();
-  await page.reload();
-  await page.getByRole('button', { name: 'List me' }).waitFor();
-  await signIn(page.locator('#signin'), 'maya@example.com', 'maya new password');
-  await page.locator('#who', { hasText: /Signed in as Maya R\./ }).waitFor();
-  await page.locator('#engineers .signout').click();
-  await done(/status of 403/); // the wrong current password
+  await f.getByRole('button', { name: 'Save changes' }).click();
+  await f.getByText('Saved. Clients see the change now.').waitFor();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await f.getByRole('button', { name: 'List me' }).waitFor();
+  assert.equal(await f.locator('[name="email"]').getAttribute('readonly'), null);
+
+  const relink = page.locator('#relink');
+  await relink.locator('[name="email"]').fill('maya@example.com');
+  await relink.getByRole('button', { name: 'Email me my edit link' }).click();
+  await relink.getByText('If maya@example.com is listed, a new link is on its way and older links stop working. One email per 10 minutes.').waitFor();
+
+  await page.goto(srv.base + '/#edit=' + keyFor(srv, 'maya@example.com').split('.')[0] + '.' + 'A'.repeat(43));
+  await relink.getByText('This edit link no longer works. Get a new one with "Email me my edit link" below.').waitFor();
+  await f.getByRole('button', { name: 'List me' }).waitFor();
+
+  await post(srv.base, '/api/engineers', { ...ENGINEER, name: 'Dev', email: 'dev@example.com' });
+  await page.goto(srv.base + '/#edit=' + keyFor(srv, 'dev@example.com')); // a link opened while the page is open
+  await page.getByText('Editing the listing for Dev (dev@example.com).').waitFor();
+  await page.getByRole('button', { name: 'Remove my listing' }).click();
+  await page.getByText('Remove your listing for good?').waitFor();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Remove my listing' }).click();
+  await page.getByRole('button', { name: 'Remove', exact: true }).click();
+  await f.getByText('Your listing is removed.').waitFor();
+  await page.getByRole('tab', { name: 'Find an engineer' }).click();
+  await page.locator('.card', { hasText: 'Maya R.' }).waitFor();
+  assert.equal(await page.locator('.card', { hasText: 'Dev' }).count(), 0);
+  await done(/status of 401/); // the bad link
 });
 
 test('staff: owner adds a moderator and an admin, moderator sees only engineers, removal signs them out', async () => {
@@ -186,18 +178,19 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await page.getByText('Wrong email or password.').waitFor();
   await page.getByLabel('Password').fill(ADMIN.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.getByText('Signed in as Owner. 1 engineer listed. 2 job requests, 1 completed for $450.').waitFor();
-  for (const t of ['Engineers', 'Clients', 'Jobs', 'Team']) assert.equal(await page.getByRole('tab', { name: t }).isVisible(), true, t);
+  await page.getByText('Signed in as Owner. 1 engineer listed. 2 hire requests.').waitFor();
+  for (const t of ['Engineers', 'Clients', 'Hire requests', 'Team']) assert.equal(await page.getByRole('tab', { name: t }).isVisible(), true, t);
+  assert.match(await page.locator('#roster tbody tr', { hasText: 'Maya R.' }).textContent(), /^Maya R\.maya@example\.com\(555\) 010-2030/, 'engineer email and phone');
 
-  await page.getByRole('tab', { name: 'Jobs' }).click();
-  const completed = page.locator('#ledger tbody tr', { hasText: 'Complete' });
-  assert.match(await completed.textContent(), /ann@example\.com\+1 555 987 6543Complete\$450$/, `default columns: key columns plus the final amount; row was "${await completed.textContent()}"`);
+  await page.getByRole('tab', { name: 'Hire requests' }).click();
+  const pkgRow = page.locator('#ledger tbody tr', { hasText: 'Stripe payments' });
+  assert.match(await pkgRow.textContent(), /Maya R\.Annann@example\.com\+1 555 987 6543Need Stripe payments added to my app\.\$400$/, `default columns; row was "${await pkgRow.textContent()}"`);
   // Columns menu: Work is opt-in; turning it on shows it and is remembered after a reload.
   assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
   await page.locator('#ledger summary', { hasText: 'Columns' }).click();
   await page.locator('#ledger .cols-list').getByLabel('Work').check();
   await page.locator('#ledger th', { hasText: 'Work' }).waitFor();
-  assert.match(await page.locator('#ledger tbody tr', { hasText: 'Complete' }).textContent(), /Deploy your app with HTTPS/);
+  assert.match(await pkgRow.textContent(), /Deploy your app with HTTPS/);
   await page.reload();
   await page.locator('#ledger th', { hasText: 'Work' }).waitFor();
   await page.locator('#ledger summary', { hasText: 'Columns' }).click();
@@ -206,7 +199,6 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await page.getByRole('tab', { name: 'Clients' }).click();
   const ann = page.locator('#clients tbody tr', { hasText: 'ann@example.com' });
   assert.match(await ann.textContent(), /^AnnAnn@example\.com|^Ann.*ann@example\.com.*\+1 555 987 6543.*2/, 'client listed from requests, latest phone, request count');
-  assert.equal(await ann.getByRole('button', { name: 'Set password' }).count(), 0, 'clients have no password');
 
   await page.getByRole('tab', { name: 'Team' }).click();
   const add = page.locator('#team form');
@@ -230,10 +222,10 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await mo.page.getByLabel('Password').fill('mo password 12');
   await mo.page.getByRole('button', { name: 'Sign in' }).click();
   await mo.page.getByText('Signed in as Moderator. 1 engineer listed.').waitFor();
-  for (const t of ['Clients', 'Jobs', 'Team']) assert.equal(await mo.page.getByRole('tab', { name: t }).isHidden(), true, t);
+  for (const t of ['Clients', 'Hire requests', 'Team']) assert.equal(await mo.page.getByRole('tab', { name: t }).isHidden(), true, t);
   assert.equal(await mo.page.locator('#roster').isVisible(), true, 'falls back to a tab the role may see');
   const row = mo.page.locator('#roster tr', { hasText: 'Maya R.' });
-  assert.equal(await row.getByRole('button', { name: 'Set password' }).count(), 0);
+  assert.ok(!/maya@example\.com|010-2030/.test(await row.textContent()), 'moderators see no contact details');
   await row.getByRole('button', { name: 'Hide' }).click();
   await mo.page.getByText('Maya R. is now hidden on the site.').waitFor();
   await row.getByRole('button', { name: 'Show' }).click();
@@ -279,7 +271,7 @@ test('controls line up at phone, tablet and desktop widths (34px), with no sidew
     if (font) await page.addStyleTag({ content: `body, button, input, select, textarea { font-family: ${font}, sans-serif !important; }` });
     for (const width of [375, 800, 1280]) {
       await page.setViewportSize({ width, height: 900 });
-      for (const sel of ['#signin .row', '#profile .row', '#profile .pkg']) {
+      for (const sel of ['#relink .row', '#profile .row', '#profile .pkg']) {
         const boxes = await page.locator(`${sel} :is(input, select, button)`).evaluateAll(els => els.filter(e => e.offsetParent).map(e => Math.round(e.getBoundingClientRect().height)));
         assert.ok(boxes.length && boxes.every(hgt => hgt === 34), `${sel} at ${width}px (${font ?? 'default font'}): heights ${boxes.join(', ')}`);
       }
