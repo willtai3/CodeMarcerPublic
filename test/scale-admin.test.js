@@ -6,8 +6,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { start, ADMIN } from './helpers.js';
-import { setAdmin } from '../lib/auth.js';
+import { start, setupOwner, ADMIN } from './helpers.js';
 
 const { chromium } = createRequire(import.meta.url)('playwright');
 const N = 5000, SLOW = process.env.CI ? 2 : 1;
@@ -21,7 +20,7 @@ before(async () => {
     name: `Engineer ${i}`, email: `e${i}@example.com`, headline: `Builds and fixes apps, number ${i}`, skills: ['react'], rate: 100,
     packages: [], payWith: 'Venmo @someone', terms: 'Upfront', portfolio: null, about: null, available: true, hidden: false, auth: { salt: '00', hash: '00' },
   }))));
-  await setAdmin(dir, ADMIN.email, ADMIN.password);
+  setupOwner(dir);
   srv = await start({}, dir);
   browser = await chromium.launch();
 });

@@ -69,16 +69,13 @@ test('engineer lists themselves: wrong sign-in, pricing required, add and remove
   assert.equal(await f.locator('[name="email"]').isHidden(), true, 'email fixed after signup');
 
   await page.getByRole('tab', { name: 'Find an engineer' }).click();
-  const c = page.locator('.card', { hasText: 'Maya R.' });
-  await c.getByRole('button', { name: 'Hire', exact: true }).click();
-  await c.getByText('Sign out of your engineer account to hire as a client.').waitFor();
-  await page.getByRole('tab', { name: 'Your requests' }).click();
-  await page.getByText("You're signed in as an engineer.").waitFor();
+  await page.locator('.card', { hasText: 'Maya R.' }).waitFor();
   await done(/status of 400/); // the deliberate validation failures
 });
 
-test('client hires: search, cancel, hourly quote, account made on the way, then a second hire while signed in', async () => {
+test('client hires without an account: search, cancel, hourly quote, name/email/phone/description required', async () => {
   const { page, done } = await open('/#find');
+  assert.equal(await page.getByRole('tab', { name: 'Your requests' }).count(), 0, 'no client sign-in anywhere');
   const c = page.locator('.card', { hasText: 'Maya R.' });
   await c.waitFor();
   await page.locator('#q').fill('flutter');
@@ -95,56 +92,44 @@ test('client hires: search, cancel, hourly quote, account made on the way, then 
 
   await c.getByRole('button', { name: 'Hire by the hour' }).click();
   const form = c.locator('form.hire');
+  assert.equal(await form.locator('[type="password"]').count(), 0, 'no password field');
   await page.getByRole('tab', { name: 'Pricing' }).click(); await page.getByRole('tab', { name: 'Find an engineer' }).click();
   await page.waitForTimeout(300);
   assert.equal(await form.count(), 1, 'hire form survives reopening the tab');
   await form.locator('[name="hours"]').fill('3');
   await form.getByText('Estimated $360 at $120/hour.').waitFor();
-  await fillAll(form, { clientName: 'Ann', clientEmail: 'not-an-email', password: 'ann password 1', details: 'Login loops after deploy on Vercel.' });
+  await fillAll(form, { clientName: 'Ann', clientEmail: 'not-an-email', clientPhone: '(555) 123-4567', details: 'Login loops after deploy on Vercel.' });
   await form.getByRole('button', { name: 'Send request' }).click();
   await form.getByText('Check the email.').waitFor();
-  await form.locator('[name="clientEmail"]').fill('maya@example.com');
-  await form.getByRole('button', { name: 'Send request' }).click();
-  await form.getByText(/That email already has an account/).waitFor();
   await form.locator('[name="clientEmail"]').fill('ann@example.com');
+  await form.locator('[name="clientPhone"]').fill('12345');
+  await form.getByRole('button', { name: 'Send request' }).click();
+  await form.getByText('Check the phone.').waitFor();
+  await form.locator('[name="clientPhone"]').fill('(555) 123-4567');
   await form.getByRole('button', { name: 'Send request' }).click();
   await c.getByText('Request sent to Maya R.').waitFor();
   assert.equal((await c.locator('.done').textContent()).includes('R..'), false, 'no double period after a name ending in a dot');
-  assert.match(await c.locator('.done').textContent(), /Quote \$360\.Email them to agree the details: maya@example\.comThey take payment by Venmo @maya-r\. Payment terms: half upfront, half on completion\./);
+  assert.match(await c.locator('.done').textContent(), /Quote \$360\.Email them to agree the details: maya@example\.comThey take payment by Venmo @maya-r\. Payment terms: half upfront, half on completion\.They have your email and phone/);
   await shot(page, 'desktop-hired');
 
   await page.locator('#q').fill('');
   await c.getByRole('button', { name: 'Hire', exact: true }).click();
-  await c.getByText('Sending as Ann (ann@example.com).').waitFor();
-  assert.equal(await c.locator('form.hire [name="password"]').count(), 0, 'no account fields when signed in');
-  await c.locator('[name="details"]').fill('Need Stripe payments added to my app.');
+  await fillAll(c.locator('form.hire'), { clientName: 'Ann', clientEmail: 'ann@example.com', clientPhone: '+1 555 987 6543', details: 'Need Stripe payments added to my app.' });
   await c.getByRole('button', { name: 'Send request' }).click();
   await c.getByText('Request sent to Maya R.').waitFor();
-
-  await c.getByRole('link', { name: 'Your requests' }).click();
-  await page.locator('#requests .who', { hasText: 'Signed in as Ann (ann@example.com). 2 open requests.' }).waitFor();
-  const hourly = page.locator('#requests-list .job', { hasText: '3 hours' });
-  assert.match(await hourly.textContent(), /Email maya@example\.com · Pay by Venmo @maya-r · Half upfront, half on completion/);
-  await hourly.getByRole('button', { name: 'Cancel request' }).click();
-  await page.locator('#requests-list .job', { hasText: '3 hours' }).getByText('Cancelled').waitFor();
-  await shot(page, 'desktop-requests');
-  await page.getByRole('tab', { name: 'For engineers' }).click();
-  await page.getByText("You're signed in as a client.").waitFor();
-  assert.equal(await page.locator('#profile').isHidden(), true);
-  await page.getByRole('tab', { name: 'Your requests' }).click();
-  await page.locator('#requests .signout').click();
-  await page.locator('#signin-client').waitFor();
-  await done(/status of (400|409)/);
+  await done(/status of 400/);
 });
 
 test('engineer dashboard: accept, mark paid, complete with cancel, edit profile, sign out', async () => {
   const { page, done } = await open('/#engineers');
   await signIn(page.locator('#signin'), 'maya@example.com', 'maya password 1');
-  await page.locator('#who', { hasText: /Signed in as Maya R\..*1 open request\./ }).waitFor();
+  await page.locator('#who', { hasText: /Signed in as Maya R\..*2 open requests\./ }).waitFor();
   const job = page.locator('#jobs .job', { hasText: 'Ann ·' }).filter({ hasText: 'Deploy your app' });
-  assert.match(await job.textContent(), /Deploy your app with HTTPS · quote \$400ann@example\.com/);
-  assert.match(await page.locator('#jobs .job', { hasText: '3 hours' }).textContent(), /Cancelled/);
+  assert.match(await job.textContent(), /Deploy your app with HTTPS · quote \$400ann@example\.com · \+1 555 987 6543/);
   await shot(page, 'desktop-dashboard');
+  const hourly = page.locator('#jobs .job', { hasText: '3 hours' });
+  await hourly.getByRole('button', { name: 'Decline' }).click();
+  await page.locator('#jobs .job', { hasText: '3 hours' }).getByText('Declined').waitFor();
 
   await job.getByRole('button', { name: 'Accept' }).click();
   await job.getByRole('button', { name: 'Mark paid' }).click();
@@ -177,17 +162,6 @@ test('engineer dashboard: accept, mark paid, complete with cancel, edit profile,
   await done();
 });
 
-test('client confirms the final amount', async () => {
-  const { page, done } = await open('/#requests');
-  await signIn(page.locator('#signin-client'), 'ann@example.com', 'ann password 1');
-  const job = page.locator('#requests-list .job', { hasText: 'Deploy your app' });
-  await job.getByText('Completed for $450. Confirm the amount if it matches what you paid.').waitFor();
-  await job.getByRole('button', { name: 'Confirm $450' }).click();
-  await job.getByText('Completed for $450. You confirmed this amount.').waitFor();
-  assert.equal(await job.getByRole('button').count(), 0);
-  await done();
-});
-
 test('staff: owner adds a moderator and an admin, moderator sees only engineers, removal signs them out', async () => {
   const { page, ctx, done } = await open('/admin');
   await page.getByLabel('Email').fill(ADMIN.email);
@@ -201,7 +175,7 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
 
   await page.getByRole('tab', { name: 'Jobs' }).click();
   const completed = page.locator('#ledger tbody tr', { hasText: 'Complete' });
-  assert.match(await completed.textContent(), /CompleteConfirmed\$450\$0$/, 'default columns: key columns plus check, amount and fee');
+  assert.match(await completed.textContent(), /ann@example\.com\+1 555 987 6543Complete\$450\$0$/, `default columns: key columns plus amount and fee; row was "${await completed.textContent()}"`);
   // Columns menu: Work is opt-in; turning it on shows it and is remembered after a reload.
   assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
   await page.locator('#ledger summary', { hasText: 'Columns' }).click();
@@ -214,13 +188,9 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await page.locator('#ledger .cols-list').getByLabel('Work').uncheck();
   assert.equal(await page.locator('#ledger th', { hasText: 'Work' }).count(), 0);
   await page.getByRole('tab', { name: 'Clients' }).click();
-  const ann = page.locator('#clients tr', { hasText: 'Ann' });
-  await ann.getByRole('button', { name: 'Set password' }).click();
-  await ann.getByRole('button', { name: 'Cancel' }).click();
-  await ann.getByRole('button', { name: 'Set password' }).click();
-  await ann.getByLabel('New password for Ann').fill('ann temporary 1');
-  await ann.getByRole('button', { name: 'Save' }).click();
-  await page.getByText('New password set for Ann. Give it to them directly.').waitFor();
+  const ann = page.locator('#clients tbody tr', { hasText: 'ann@example.com' });
+  assert.match(await ann.textContent(), /^AnnAnn@example\.com|^Ann.*ann@example\.com.*\+1 555 987 6543.*2/, 'client listed from requests, latest phone, request count');
+  assert.equal(await ann.getByRole('button', { name: 'Set password' }).count(), 0, 'clients have no password');
 
   await page.getByRole('tab', { name: 'Team' }).click();
   const add = page.locator('#team form');
@@ -278,7 +248,7 @@ test('phone: no sideways scroll on every tab and the hire form; screenshots', as
   await page.getByRole('button', { name: 'Hire by the hour' }).first().click();
   assert.equal(await noSideScroll(page), true, 'hire form');
   await shot(page, 'phone-find');
-  for (const tab of ['requests', 'engineers', 'pricing']) {
+  for (const tab of ['engineers', 'pricing']) {
     await page.locator(`[data-tab=${tab}]`).click();
     assert.equal(await noSideScroll(page), true, tab);
     await shot(page, 'phone-' + tab);

@@ -2,11 +2,16 @@
   "name": "codemarcer",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
-  "scripts": {
-    "start": "node server.js",
-    "admin": "node admin-setup.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+  "engines": {
+    "node": ">=20"
   },
-  "devDependencies": { "playwright": "1.63.0" }
+  "scripts": {
+    "build": "go build -trimpath -o bin/codemarcer .",
+    "start": "go run .",
+    "admin": "go run . admin",
+    "test": "npm run build && go test -count=1 ./... && node --test --test-concurrency=1 test/*.test.js"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
 }
