@@ -70,10 +70,6 @@ func newID() string {
 
 func (a *API) stamp() string { return a.now().UTC().Format("2006-01-02T15:04:05.000Z") }
 
-func (a *API) pricing() map[string]any {
-	return map[string]any{"pct": pctAt(a.now()), "feePct": feePct, "promoEnd": promoEnd.UnixMilli()}
-}
-
 // role resolves a session to its current role, or "" when it no longer grants anything. Call with st.mu held.
 func (a *API) role(s *Session) string {
 	switch {
@@ -169,7 +165,6 @@ func NewAPI(st *Store, dataDir string) *API {
 			defer st.mu.RUnlock()
 			return ok(a.directory())
 		},
-		"GET /api/pricing": func(b B, s *Session) Result { return ok(a.pricing()) },
 
 		// Sign-up: the password is hashed before the lock; the email check and the add then happen under one lock,
 		// so two sign-ups with the same email can't both succeed.
@@ -236,7 +231,7 @@ func NewAPI(st *Store, dataDir string) *API {
 			if bad != "" {
 				return fail(400, bad)
 			}
-			j := &Job{ID: newID(), Kind: "job", Created: a.stamp(), EngineerID: e.ID, ClientName: d["clientName"].(string), ClientEmail: d["clientEmail"].(string), ClientPhone: d["clientPhone"].(string), Details: d["details"].(string), Link: strPtr(d["link"]), Choice: *c, Quote: c.Quote, Pct: pctAt(a.now()), Status: "requested"}
+			j := &Job{ID: newID(), Kind: "job", Created: a.stamp(), EngineerID: e.ID, ClientName: d["clientName"].(string), ClientEmail: d["clientEmail"].(string), ClientPhone: d["clientPhone"].(string), Details: d["details"].(string), Link: strPtr(d["link"]), Choice: *c, Quote: c.Quote, Status: "requested"}
 			if err := st.addJob(j); err != nil {
 				return fail(500, "server")
 			}
@@ -257,7 +252,7 @@ func NewAPI(st *Store, dataDir string) *API {
 					jobs = append(jobs, *j)
 				}
 			}
-			return ok(map[string]any{"role": "engineer", "profile": private(st.engineers[s.ID]), "jobs": newestFirst(jobs, func(j Job) string { return j.Created }), "pricing": a.pricing()})
+			return ok(map[string]any{"role": "engineer", "profile": private(st.engineers[s.ID]), "jobs": newestFirst(jobs, func(j Job) string { return j.Created })})
 		},
 		"POST /api/me": func(b B, s *Session) Result {
 			st.mu.RLock()
@@ -311,8 +306,7 @@ func NewAPI(st *Store, dataDir string) *API {
 			}
 			return ok(map[string]bool{"ok": true})
 		},
-		// The engineer moves a job through its statuses. The fee rate was fixed when the client sent the request;
-		// completing applies it to the final amount.
+		// The engineer moves a job through its statuses; completing records the final amount the client paid them.
 		"POST /api/me/jobs": func(b B, s *Session) Result {
 			id, _ := b["id"].(string)
 			to, _ := b["status"].(string)
@@ -340,8 +334,7 @@ func NewAPI(st *Store, dataDir string) *API {
 				j.Status = to
 				if to == "complete" {
 					amt, stamp := n.(int), a.stamp()
-					fee, payout := feeFor(amt, j.Pct)
-					j.Amount, j.Fee, j.Payout, j.Completed = &amt, &fee, &payout, &stamp
+					j.Amount, j.Completed = &amt, &stamp
 				}
 			}); err != nil {
 				return fail(500, "server")
@@ -415,7 +408,7 @@ func NewAPI(st *Store, dataDir string) *API {
 				}
 				engineers = append(engineers, row)
 			}
-			out := map[string]any{"me": map[string]any{"role": r, "perms": perms[r]}, "engineers": newestFirst(engineers, func(e engRow) string { return e.Created }), "pricing": a.pricing()}
+			out := map[string]any{"me": map[string]any{"role": r, "perms": perms[r]}, "engineers": newestFirst(engineers, func(e engRow) string { return e.Created })}
 			if can(r, "accounts") {
 				// Clients have no accounts; this lists everyone who has sent a request, grouped by email, latest details first.
 				type clientRow struct {
@@ -445,7 +438,7 @@ func NewAPI(st *Store, dataDir string) *API {
 					Engineer string `json:"engineer"`
 				}
 				rows := make([]jobRow, 0, len(jobs))
-				done, billed, fees := 0, 0, 0.0
+				done, billed := 0, 0
 				for _, j := range jobs {
 					name := "(removed)"
 					if e := st.engineers[j.EngineerID]; e != nil {
@@ -453,10 +446,10 @@ func NewAPI(st *Store, dataDir string) *API {
 					}
 					rows = append(rows, jobRow{*j, name})
 					if j.Status == "complete" {
-						done, billed, fees = done+1, billed+*j.Amount, fees+*j.Fee
+						done, billed = done+1, billed+*j.Amount
 					}
 				}
-				out["jobs"], out["totals"] = rows, map[string]any{"requested": len(jobs), "completed": done, "billed": billed, "fees": float64(int(fees*100+0.5)) / 100}
+				out["jobs"], out["totals"] = rows, map[string]any{"requested": len(jobs), "completed": done, "billed": billed}
 			}
 			if can(r, "staff") {
 				staff := []Staff{}

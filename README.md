@@ -7,11 +7,11 @@ Hire a software engineer to finish, fix and ship the app you built with AI.
 **Built an app with AI and need help?** Browse engineers and hire one at **https://codemarcer.com/#find**.
 **Software engineer?** List your hourly rate and fixed-price packages at **https://codemarcer.com/#engineers**. Clients hire you on the site and pay you directly.
 
-No fees on any job requested before February 1, 2027. After that, engineers pay 10% of each completed job.
+No fees, for engineers or clients. It's a straight exchange: the client pays the engineer directly and CodeMarcer takes nothing.
 
 ## Want to work on this code?
 
-This repository is public so engineers can see how the site works. It isn't a volunteer project: paid work on it, including taking it to production (hosting with HTTPS, a managed database with backups, email notifications and fee payments), is hired through the site. **List yourself on the site** with your rate and packages to be considered. Please don't send unsolicited pull requests.
+This repository is public so engineers can see how the site works. It isn't a volunteer project: paid work on it, including taking it to production (hosting with HTTPS, a managed database with backups and email notifications), is hired through the site. **List yourself on the site** with your rate and packages to be considered. Please don't send unsolicited pull requests.
 
 Found a bug? Open an issue. Found a security problem? Report it privately, see [SECURITY.md](SECURITY.md).
 
@@ -21,7 +21,6 @@ Found a bug? Open an issue. Found a security problem? Report it privately, see [
 - Engineers sign up with a headline, skills, an hourly rate and/or up to 5 fixed-price packages, how clients pay them (Venmo, Zelle, PayPal…) and when (upfront, half and half, on completion). Profiles go live at once; staff can hide one.
 - The client pays the engineer directly. CodeMarcer never holds money. The engineer contacts the client, accepts or declines, marks the job paid and complete, and enters the final amount.
 - Staff sign in at /admin. The owner (made with `codemarcer admin`) adds team members as **admin** (engineers, clients, jobs, setting temporary engineer passwords) or **moderator** (hiding and showing engineers only). Roles are checked on every request, so a change or removal applies immediately.
-- The fee rate is fixed when the client sends the request: 0% before Feb 1, 2027 00:00 Pacific, then 10% of the final amount, which the engineer owes CodeMarcer. `fees.go` holds the rule for the server and `public/fees.js` for the page; a test fails if they differ.
 
 ## Run locally
 
@@ -44,7 +43,6 @@ Settings (environment variables, all optional): PORT (8080), HOST (127.0.0.1), D
 - `rules.go` — validation of every request field, quotes, job status rules and staff permissions.
 - `store.go` — the records and JSON file storage (atomic writes, rolled back if a write fails).
 - `auth.go` — password hashing and the owner account.
-- `fees.go` — fee rules.
 - `public/` — the site and admin page, plain ES modules, no build step.
 
 ## Security
@@ -59,7 +57,7 @@ Standard web setup: HTTPS from the host (TLS in transit, HSTS, `__Host-` Secure 
 - Moderators see listings without engineers' emails or payment handles.
 - CI runs `gofmt`, `go vet`, `govulncheck`, the race detector on the Go tests, and a gitleaks secret scan.
 
-Public surface: GET /, /admin (page shell only), /app.js, /admin.js, /ui.js, /fees.js, /styles.css, /favicon.svg, /api/engineers (public profiles only: no email or payment details), /api/pricing; POST /api/engineers, /api/login, /api/logout, /api/jobs, /api/admin/login, /api/admin/logout. Everything else needs a signed-in engineer or staff member with the right role. `test/api.test.js` fails if this list changes.
+Public surface: GET /, /admin (page shell only), /app.js, /admin.js, /ui.js, /styles.css, /favicon.svg, /api/engineers (public profiles only: no email or payment details); POST /api/engineers, /api/login, /api/logout, /api/jobs, /api/admin/login, /api/admin/logout. Everything else needs a signed-in engineer or staff member with the right role. `test/api.test.js` fails if this list changes.
 
 ## Tests
 

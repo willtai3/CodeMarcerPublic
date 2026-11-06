@@ -12,7 +12,7 @@ body:
     id: steps
     attributes:
       label: Steps to reproduce
-      placeholder: "1. Open the Pricing tab\n2. Enter 5000\n3. ..."
+      placeholder: "1. Open Find an engineer\n2. Click Hire by the hour\n3. ..."
     validations:
       required: true
   - type: input

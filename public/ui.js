@@ -24,3 +24,5 @@ export const tabs = (nav, onShow = () => {}) => {
 };
 
 export const date = iso => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+export const usd = n => n == null ? 'Open to quotes' : '$' + n.toLocaleString('en-US', { maximumFractionDigits: 2 });

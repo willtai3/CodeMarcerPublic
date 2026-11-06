@@ -15,7 +15,6 @@
 - `rules.go` — validation of every request field, quotes, job status rules, staff permissions.
 - `store.go` — records and JSON file storage with atomic writes.
 - `auth.go` — password hashing and the owner account.
-- `fees.go` and `public/fees.js` — fee rules for the server and the page (a test keeps them equal).
 - `public/` — the site and admin page (plain ES modules, no build step), built into the binary.
 - `logic_test.go` — Go unit tests. `test/` — API, browser and scale tests that drive the real binary.
 

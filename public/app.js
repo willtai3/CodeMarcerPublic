@@ -1,18 +1,4 @@
-import { $, $$, h, api, tabs, date } from './ui.js';
-import { pctAt, feeFor, usd, FEE_PCT, PROMO_LABEL } from './fees.js';
-
-// ---- Pricing ----
-const free = pctAt() === 0;
-$('#promo').textContent = free ? `Free until ${PROMO_LABEL}` : `${FEE_PCT}% fee`;
-$('#price-now').textContent = free ? `No fee on any job requested before ${PROMO_LABEL}.` : `${FEE_PCT}% of each completed job.`;
-$('#price-rule').textContent = `From ${PROMO_LABEL}, engineers pay ${FEE_PCT}% of each completed job's amount, billed monthly. Clients pay nothing extra.`;
-const calc = () => {
-  const a = +$('#amount').value.replace(/\D/g, '') || 0, now = feeFor(a, pctAt()), later = feeFor(a, FEE_PCT);
-  $('#calc-out').textContent = free
-    ? `Requested now: fee ${usd(now.fee)}, engineer keeps ${usd(now.payout)}. Requested from ${PROMO_LABEL}: fee ${usd(later.fee)}, engineer keeps ${usd(later.payout)}.`
-    : `Fee ${usd(now.fee)}, engineer keeps ${usd(now.payout)}.`;
-};
-$('#amount').addEventListener('input', calc); calc();
+import { $, $$, h, api, tabs, date, usd } from './ui.js';
 
 // ---- Shared form helpers ----
 const MSG = {
@@ -159,7 +145,7 @@ const job = j => {
     h('p', {}, h('span', { className: 'select', textContent: j.clientEmail }), ' · ', h('span', { className: 'select', textContent: j.clientPhone })),
     h('p', { className: 'about', textContent: j.details }),
     j.link && h('a', { href: j.link, textContent: j.link, rel: 'noopener noreferrer', target: '_blank' }),
-    j.status === 'complete' && h('p', { className: 'meta', textContent: `Completed for ${usd(j.amount)}. ${j.pct ? `Fee ${usd(j.fee)} (${j.pct}%) owed to CodeMarcer.` : 'No fee: requested during the free period.'}`.trim() }),
+    j.status === 'complete' && h('p', { className: 'meta', textContent: `Completed for ${usd(j.amount)}.` }),
     actions, h('p', { className: 'msg', role: 'status' }));
 };
 const empty = text => h('li', { className: 'empty', textContent: text });

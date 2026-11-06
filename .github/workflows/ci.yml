@@ -40,7 +40,7 @@ jobs:
         run: npm ci --no-audit --no-fund # exact versions from package-lock.json
         timeout-minutes: 8
       - name: "Step 7: Install Chromium for browser tests"
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium # the runner image already has its system libraries; --with-deps only added fonts from a slow apt mirror
         timeout-minutes: 8
       - name: "Step 8: Build, then run Go, API, browser and scale tests"
         shell: bash # "bash" adds -o pipefail, so a failing test fails the step even through tee

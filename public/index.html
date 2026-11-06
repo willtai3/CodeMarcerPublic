@@ -12,11 +12,11 @@
 <body>
 <header class="top">
   <a class="brand" href="/"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h7m0 0-3-3m3 3-3 3M13 6h7v12h-7"/></svg>CodeMarcer</a>
-  <span class="promo" id="promo"></span>
+  <span class="badge">No fees</span>
 </header>
 <main>
   <h1>You vibecoded the app. Hire the engineer who ships it.</h1>
-  <p class="lead">Engineers list their hourly rate and fixed-price packages. Pick one, send a request, and pay the engineer directly with whatever they accept.</p>
+  <p class="lead">Engineers list their hourly rate and fixed-price packages. Pick one, send a request, and pay the engineer directly with whatever they accept. CodeMarcer takes no fee from either side.</p>
   <ol class="steps">
     <li>Find an engineer whose skills fit your app.</li>
     <li>Choose a package or hourly work and send your request.</li>
@@ -26,7 +26,6 @@
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button role="tab" data-tab="find">Find an engineer</button>
     <button role="tab" data-tab="engineers">For engineers</button>
-    <button role="tab" data-tab="pricing">Pricing</button>
   </nav>
 
   <section role="tabpanel" id="find" hidden>
@@ -78,14 +77,6 @@
       <button class="primary" id="profile-save"></button>
       <p class="msg" role="status"></p>
     </form>
-  </section>
-
-  <section role="tabpanel" id="pricing" hidden>
-    <p class="big" id="price-now"></p>
-    <p id="price-rule"></p>
-    <p>Clients pay engineers directly, by whatever method the engineer lists. CodeMarcer never holds the money. Listing yourself and browsing are always free. The fee rate is fixed on the day the client sends the request.</p>
-    <label class="calc">Job amount, USD<input id="amount" inputmode="numeric" value="5000"></label>
-    <p id="calc-out" aria-live="polite"></p>
   </section>
 
   <datalist id="stacks"><option value="react"><option value="next.js"><option value="node"><option value="python"><option value="typescript"><option value="supabase"><option value="firebase"><option value="postgres"><option value="stripe"><option value="react native"><option value="flutter"><option value="swift"><option value="aws"><option value="azure"><option value="vercel"><option value="tailwind"><option value="openai"></datalist>
