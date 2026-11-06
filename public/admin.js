@@ -30,8 +30,7 @@ const list = (name, cols, items, empty) => {
   page();
   return wrap;
 };
-const STATUS = { requested: 'New request', accepted: 'Accepted', paid: 'Paid', complete: 'Complete', declined: 'Declined', cancelled: 'Cancelled' };
-const CHECK = { confirmed: 'Confirmed', disputed: 'Disputed' };
+const STATUS = { requested: 'New request', accepted: 'Accepted', paid: 'Paid', complete: 'Complete', declined: 'Declined' };
 const ROLE = { owner: 'Owner', admin: 'Admin', moderator: 'Moderator' };
 
 // One code path for every admin action: send, then redraw from fresh data; failures are named.
@@ -60,7 +59,7 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
   const has = p => me.perms.includes(p);
   for (const b of $$('#app [data-perm]')) b.hidden = !has(b.dataset.perm);
   if ($(`#app [data-tab="${location.hash.slice(1)}"]`)?.hidden !== false) showTab($('#app [data-tab]:not([hidden])').dataset.tab);
-  $('#summary').textContent = `Signed in as ${ROLE[me.role]}. ${plural(engineers.length, 'engineer')} listed.` + (totals ? ` ${plural(totals.requested, 'job request')}, ${totals.completed} completed for ${usd(totals.billed)}. Fees owed: ${usd(totals.fees)}.${totals.disputed ? ` ${plural(totals.disputed, 'dispute')} to follow up.` : ''}` : '');
+  $('#summary').textContent = `Signed in as ${ROLE[me.role]}. ${plural(engineers.length, 'engineer')} listed.` + (totals ? ` ${plural(totals.requested, 'job request')}, ${totals.completed} completed for ${usd(totals.billed)}. Fees owed: ${usd(totals.fees)}.` : '');
 
   $('#roster').replaceChildren(list('engineers', [
     { label: 'Engineer', always: true, cell: e => contactCell(e, h('p', { className: 'meta', textContent: e.headline })) },
@@ -73,19 +72,20 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
     ...(has('accounts') ? [{ label: 'Account', cell: setPassword }] : []),
   ], engineers, 'No engineers yet.'));
 
+  // Clients have no accounts: this is everyone who has sent a request, by email, with their latest name and phone.
   if (clients) $('#clients').replaceChildren(list('clients', [
-    { label: 'Client', always: true, cell: c => contactCell(c) },
+    { label: 'Client', always: true, cell: c => contactCell(c, [h('br'), h('span', { className: 'select', textContent: c.phone })]) },
     { label: 'Requests', on: true, cell: c => String(c.jobs) },
-    { label: 'Joined', cell: c => date(c.created) },
-    { label: 'Account', on: true, cell: setPassword },
-  ], clients, 'No clients yet.'));
+    { label: 'Last request', on: true, cell: c => date(c.last) },
+    { label: 'First request', cell: c => date(c.created) },
+  ], clients, 'No requests yet.'));
 
   if (jobs) $('#ledger').replaceChildren(list('jobs', [
     { label: 'Requested', always: true, cell: j => date(j.created) },
     { label: 'Engineer', always: true, cell: j => j.engineer },
-    { label: 'Client', always: true, cell: j => contactCell(j.client) },
+    { label: 'Client', always: true, cell: j => contactCell({ name: j.clientName, email: j.clientEmail }, [h('br'), h('span', { className: 'select', textContent: j.clientPhone })]) },
     { label: 'Status', always: true, cell: j => STATUS[j.status] },
-    { label: 'Client check', on: true, cell: j => j.clientCheck ? h('span', { className: `status ${j.clientCheck === 'disputed' ? 's-requested' : 's-complete'}`, textContent: CHECK[j.clientCheck] }) : '' },
+    { label: 'What they need', cell: j => h('p', { className: 'about', textContent: j.details }) },
     { label: 'Work', cell: j => j.choice.type === 'hourly' ? `${j.choice.hours} hours at ${usd(j.choice.rate)}/hour` : j.choice.title },
     { label: 'Quote', cell: j => usd(j.quote) },
     { label: 'Final amount', on: true, cell: j => j.amount == null ? '' : usd(j.amount) },
@@ -97,7 +97,7 @@ const render = ({ me, engineers, clients, jobs, totals, staff }) => {
       h('label', {}, 'Name', h('input', { name: 'name', maxLength: 80 })),
       h('label', {}, 'Email', h('input', { name: 'email', type: 'email', maxLength: 120 })),
       h('label', {}, 'Temporary password', h('input', { name: 'password', type: 'text', maxLength: 200, autocomplete: 'off', placeholder: '10+ characters' })),
-      h('label', {}, 'Role', h('select', { name: 'role' }, h('option', { value: 'moderator', textContent: 'Moderator: hide and show engineers' }), h('option', { value: 'admin', textContent: 'Admin: also clients, jobs and passwords' }))),
+      h('label', {}, 'Role', h('select', { name: 'role' }, h('option', { value: 'moderator', textContent: 'Moderator: hide and show engineers' }), h('option', { value: 'admin', textContent: 'Admin: also clients, jobs and engineer passwords' }))),
       h('button', { className: 'primary', textContent: 'Add to team' }));
     form.onsubmit = e => { e.preventDefault(); act('/api/admin/staff', Object.fromEntries(new FormData(form)), `${form.elements.name.value} added. Give them the temporary password; they sign in here.`)({ currentTarget: form.querySelector('button') }); };
     $('#team').replaceChildren(

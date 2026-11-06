@@ -20,12 +20,11 @@
   <ol class="steps">
     <li>Find an engineer whose skills fit your app.</li>
     <li>Choose a package or hourly work and send your request.</li>
-    <li>Agree the details by email, pay them directly, and they mark the job complete.</li>
+    <li>They contact you by email or phone, you pay them directly, and they mark the job complete.</li>
   </ol>
 
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button role="tab" data-tab="find">Find an engineer</button>
-    <button role="tab" data-tab="requests">Your requests</button>
     <button role="tab" data-tab="engineers">For engineers</button>
     <button role="tab" data-tab="pricing">Pricing</button>
   </nav>
@@ -35,27 +34,7 @@
     <ul class="board" id="list"></ul>
   </section>
 
-  <section role="tabpanel" id="requests" hidden>
-    <div data-show="out" class="stack">
-      <form id="signin-client" class="signin" novalidate>
-        <p>Sign in to follow the requests you've sent. Your account is created when you send your first request from Find an engineer.</p>
-        <div class="row">
-          <label>Email<input name="email" type="email" required autocomplete="username"></label>
-          <label>Password<input name="password" type="password" required autocomplete="current-password"></label>
-        </div>
-        <button class="primary">Sign in</button>
-        <p class="msg" role="status"></p>
-      </form>
-    </div>
-    <p data-show="engineer" hidden>You're signed in as an engineer. Your requests from clients are on the For engineers tab.</p>
-    <div data-show="client" class="stack" hidden>
-      <div class="row-between"><span class="who"></span><button class="quiet signout" type="button">Sign out</button></div>
-      <ul class="jobs" id="requests-list"></ul>
-    </div>
-  </section>
-
   <section role="tabpanel" id="engineers" hidden>
-    <p data-show="client" hidden>You're signed in as a client. Sign out to list yourself as an engineer with a different email.</p>
     <div data-show="out" class="stack">
       <form id="signin" class="signin" novalidate>
         <p>Already listed? Sign in to see your requests and edit your profile.</p>
@@ -108,6 +87,6 @@
 
   <datalist id="stacks"><option value="react"><option value="next.js"><option value="node"><option value="python"><option value="typescript"><option value="supabase"><option value="firebase"><option value="postgres"><option value="stripe"><option value="react native"><option value="flutter"><option value="swift"><option value="aws"><option value="azure"><option value="vercel"><option value="tailwind"><option value="openai"></datalist>
 </main>
-<footer>CodeMarcer lists engineers and passes on requests. It doesn't employ, vet or vouch for engineers and doesn't handle payments. Agree scope, price and ownership of the code in writing before you pay. This site is <a href="https://github.com/willtai3/CodeMarcerPublic" rel="noopener">open source on GitHub</a>.</footer>
+<footer>CodeMarcer lists engineers and passes on requests. It doesn't employ, vet or vouch for engineers and doesn't handle payments. Agree scope, price and ownership of the code in writing before you pay. The source code is <a href="https://github.com/willtai3/CodeMarcerPublic" rel="noopener">public on GitHub</a>.</footer>
 </body>
 </html>

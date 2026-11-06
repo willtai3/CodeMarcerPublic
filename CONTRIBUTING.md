@@ -2,27 +2,28 @@
 
 ## Get it running (about 2 minutes)
 
-1. Install Node 20 or newer.
-2. `npm install` (installs Playwright for the browser tests; the app itself has no dependencies).
+1. Install Go 1.24 or newer, and Node 20 or newer (Node is only for the browser tests).
+2. `npm install` (installs Playwright; the server itself has no third-party dependencies).
 3. `npx playwright install chromium`
-4. `npm test` — all tests should pass before you change anything.
-5. `npm run admin` to create a local admin login, then `npm start` and open http://127.0.0.1:8080 and /admin.
+4. `npm test` — builds `bin/codemarcer`, runs the Go tests, then the API, browser and scale tests. All should pass before you change anything.
+5. `DATA_DIR=./data bin/codemarcer admin` to create a local owner login, then `DATA_DIR=./data bin/codemarcer` and open http://127.0.0.1:8080 and /admin.
 
 ## Where things are
 
-- `server.js` — HTTP, security headers, sessions, rate limits.
-- `lib/api.js` — every API route as a plain function (shared with the demo).
-- `lib/rules.js` — validation, quotes, job status rules, public profile view.
-- `lib/auth.js`, `admin-setup.js` — scrypt passwords and the owner account.
-- `lib/store.js` — JSON file storage with atomic writes.
-- `public/fees.js` — the only place fee rules live (free before Feb 1, 2027 Pacific, then 10% of completed jobs).
-- `public/` — the site and admin page (plain ES modules, no build step).
-- `test/` — unit, API and Playwright browser tests.
+- `main.go` — HTTP, security headers, sessions, rate limits, the built-in pages, the `admin` command.
+- `api.go` — every API route with its role check.
+- `rules.go` — validation of every request field, quotes, job status rules, staff permissions.
+- `store.go` — records and JSON file storage with atomic writes.
+- `auth.go` — password hashing and the owner account.
+- `fees.go` and `public/fees.js` — fee rules for the server and the page (a test keeps them equal).
+- `public/` — the site and admin page (plain ES modules, no build step), built into the binary.
+- `logic_test.go` — Go unit tests. `test/` — API, browser and scale tests that drive the real binary.
 
 ## Rules for changes
 
 - Work on a branch and open a pull request into `main`. Don't push to `main`.
-- CI must be green (tests and the secret scan) before merge.
+- CI must be green (gofmt, go vet, govulncheck, tests and the secret scan) before merge.
+- Keep the server on Go's standard library. A third-party module needs a written reason in the PR.
 - When a check fails, CI reports it by itself: a comment on the pull request, or an issue labelled `failure` for `main`, naming the step that failed and the raw output.
 - Every bug fix or feature comes with a test that would have caught it.
 - Any route reachable without signing in must be added to the public list in `test/api.test.js` on purpose.

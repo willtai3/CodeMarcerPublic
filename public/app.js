@@ -17,8 +17,8 @@ $('#amount').addEventListener('input', calc); calc();
 // ---- Shared form helpers ----
 const MSG = {
   rate: 'Too many attempts from this connection. Try again later.', request: 'That request was refused. Reload the page and try again.',
-  pricing: 'Add an hourly rate or at least one package.', 'email-taken': 'That email already has an account. Sign in on Your requests or For engineers first.',
-  password: 'Use a password of 10 to 200 characters.', auth: 'Wrong email or password.', role: 'Sign out of your engineer account to hire as a client.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
+  pricing: 'Add an hourly rate or at least one package.', 'email-taken': 'That email is already listed. Sign in instead.',
+  password: 'Use a password of 10 to 200 characters.', auth: 'Wrong email or password.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
 };
 const labelOf = el => el?.closest('label')?.firstChild.textContent.split(/,| \(/)[0].trim().toLowerCase().replace(/^your /, '');
 const fail = (form, err) => {
@@ -80,7 +80,6 @@ const card = e => {
 // One hire form open at a time, inside the engineer's card.
 const openHire = (e, choice, slot) => {
   $$('.hire-slot').forEach(s => s.replaceChildren());
-  if (role === 'engineer') return slot.replaceChildren(h('p', { className: 'msg error', textContent: MSG.role }));
   const pkg = e.packages[choice.slice(1)], hourly = choice === 'hourly';
   const quote = h('p', { className: 'meta' }), hours = hourly && h('input', { name: 'hours', inputMode: 'numeric', value: '10', required: true });
   const setQuote = () => { quote.textContent = `Estimated ${usd((+hours.value.replace(/\D/g, '') || 0) * e.rate)} at ${usd(e.rate)}/hour.`; };
@@ -88,11 +87,9 @@ const openHire = (e, choice, slot) => {
   const form = h('form', { className: 'hire', noValidate: true },
     h('p', { textContent: hourly ? sentence(`Hourly work with ${e.name}`) : `${pkg.title} for ${usd(pkg.price)}, about ${pkg.days} day${pkg.days > 1 ? 's' : ''}.` }),
     hourly && [field('Estimated hours', hours), quote],
-    role === 'client' ? h('p', { className: 'meta', textContent: `Sending as ${me.name} (${me.email}).` }) : [
-      field('Your name', h('input', { name: 'clientName', required: true, maxLength: 80, autocomplete: 'name' })),
-      field('Your email', h('input', { name: 'clientEmail', type: 'email', required: true, maxLength: 120, autocomplete: 'email' })),
-      field('Create a password to follow this request, 10+ characters', h('input', { name: 'password', type: 'password', required: true, maxLength: 200, autocomplete: 'new-password' })),
-      h('p', { className: 'meta' }, 'Already have an account? ', h('a', { href: '#requests', textContent: 'Sign in on Your requests' }), ' first.')],
+    field('Your name', h('input', { name: 'clientName', required: true, maxLength: 80, autocomplete: 'name' })),
+    field('Your email', h('input', { name: 'clientEmail', type: 'email', required: true, maxLength: 120, autocomplete: 'email' })),
+    field('Your phone', h('input', { name: 'clientPhone', type: 'tel', required: true, maxLength: 25, autocomplete: 'tel', placeholder: '(555) 123-4567' })),
     field('What you need', h('textarea', { name: 'details', required: true, rows: 4, maxLength: 2000, placeholder: 'What the app does, what is broken or missing, and any deadline.' })),
     field('Link to the app or repo (optional)', h('input', { name: 'link', type: 'url', maxLength: 200, placeholder: 'https://' })),
     h('input', { className: 'trap', name: 'website', tabIndex: -1, autocomplete: 'off', ariaHidden: 'true' }),
@@ -105,15 +102,13 @@ const openHire = (e, choice, slot) => {
       h('p', {}, h('strong', { textContent: sentence(`Request sent to ${r.engineer.name}`) }), ` Quote ${usd(r.quote)}.`),
       h('p', {}, 'Email them to agree the details: ', h('strong', { className: 'select', textContent: r.engineer.email })),
       h('p', { textContent: `They take payment by ${r.engineer.payWith}. Payment terms: ${r.engineer.terms.toLowerCase()}.` }),
-      h('p', { className: 'meta', textContent: 'Pay the engineer directly. CodeMarcer never holds the money; agree the scope in writing before paying.' }),
-      h('p', {}, 'Follow it on ', h('a', { href: '#requests', textContent: 'Your requests' }), '.')));
-    await loadMe();
+      h('p', { className: 'meta', textContent: `They have your email and phone and will contact you. Pay the engineer directly. CodeMarcer never holds the money; agree the scope in writing before paying.` })));
   });
   slot.replaceChildren(form);
-  form.elements[hourly ? 'hours' : role === 'client' ? 'details' : 'clientName'].focus();
+  form.elements[hourly ? 'hours' : 'clientName'].focus();
 };
 
-// ---- Accounts: engineers and clients sign in on the site; each tab shows what fits the signed-in role ----
+// ---- For engineers: sign in, profile, requests from clients (clients have no account) ----
 const profile = $('#profile'), pkgs = $('#pkgs');
 let role = null, me = null;
 const pkgRow = (p = {}) => {
@@ -145,12 +140,11 @@ const setMode = (r, p = null) => {
   $('#profile-save').textContent = on ? 'Save profile' : 'List me';
 };
 
-const STATUS = { requested: 'New request', accepted: 'Accepted', paid: 'Paid', complete: 'Complete', declined: 'Declined', cancelled: 'Cancelled' };
+const STATUS = { requested: 'New request', accepted: 'Accepted', paid: 'Paid', complete: 'Complete', declined: 'Declined' };
 const ACTIONS = { requested: [['accepted', 'Accept'], ['declined', 'Decline']], accepted: [['paid', 'Mark paid'], ['complete', 'Mark complete'], ['declined', 'Decline']], paid: [['complete', 'Mark complete']] };
 const what = c => c.type === 'hourly' ? `${c.hours} hours at ${usd(c.rate)}/hour` : c.title;
 const setJob = async (btn, body) => { btn.disabled = true; try { await api('/api/me/jobs', body); await loadMe(); } catch (err) { err.status === 401 ? setMode(null) : (btn.disabled = false, btn.closest('li').querySelector('.msg').textContent = `Couldn't update: ${err.message}.`); } };
 const small = (label, onclick) => h('button', { className: 'small', type: 'button', textContent: label, onclick });
-const CHECK = { confirmed: 'The client confirmed this amount.', disputed: 'The client reported a problem with this job; the site owner will follow up.' };
 const job = j => {
   const actions = h('div', { className: 'inline wrap' });
   const complete = () => {
@@ -161,25 +155,12 @@ const job = j => {
   const draw = () => actions.replaceChildren(...(ACTIONS[j.status] ?? []).map(([s, label]) => h('button', { className: 'small', type: 'button', textContent: label, onclick: e => s === 'complete' ? complete() : setJob(e.currentTarget, { id: j.id, status: s }) })));
   draw();
   return h('li', { className: 'job' },
-    h('div', { className: 'row-between' }, h('strong', { textContent: `${j.client.name} · ${date(j.created)}` }), h('span', { className: `status s-${j.status}`, textContent: STATUS[j.status] })),
+    h('div', { className: 'row-between' }, h('strong', { textContent: `${j.clientName} · ${date(j.created)}` }), h('span', { className: `status s-${j.status}`, textContent: STATUS[j.status] })),
     h('p', { textContent: `${what(j.choice)} · quote ${usd(j.quote)}` }),
-    h('p', { className: 'select', textContent: j.client.email }),
+    h('p', {}, h('span', { className: 'select', textContent: j.clientEmail }), ' · ', h('span', { className: 'select', textContent: j.clientPhone })),
     h('p', { className: 'about', textContent: j.details }),
     j.link && h('a', { href: j.link, textContent: j.link, rel: 'noopener noreferrer', target: '_blank' }),
-    j.status === 'complete' && h('p', { className: 'meta', textContent: `Completed for ${usd(j.amount)}. ${j.pct ? `Fee ${usd(j.fee)} (${j.pct}%) owed to CodeMarcer.` : 'No fee: requested during the free period.'} ${CHECK[j.clientCheck] ?? ''}`.trim() }),
-    actions, h('p', { className: 'msg', role: 'status' }));
-};
-// A client's view of a request: the engineer's contact and payment details, cancel before acceptance, confirm or dispute at the end.
-const request = j => {
-  const actions = h('div', { className: 'inline wrap' }), body = b => e => setJob(e.currentTarget, { id: j.id, ...b });
-  if (j.status === 'requested') actions.append(small('Cancel request', body({ status: 'cancelled' })));
-  if (j.status === 'complete' && !j.clientCheck) actions.append(small(`Confirm ${usd(j.amount)}`, body({ check: 'confirmed' })), small('Report a problem', body({ check: 'disputed' })));
-  return h('li', { className: 'job' },
-    h('div', { className: 'row-between' }, h('strong', { textContent: `${j.engineer.name} · ${date(j.created)}` }), h('span', { className: `status s-${j.status}`, textContent: STATUS[j.status] })),
-    h('p', { textContent: `${what(j.choice)} · quote ${usd(j.quote)}` }),
-    j.engineer.payWith && h('p', {}, 'Email ', h('span', { className: 'select', textContent: j.engineer.email }), ` · Pay by ${j.engineer.payWith} · ${j.engineer.terms}`),
-    h('p', { className: 'about', textContent: j.details }),
-    j.status === 'complete' && h('p', { className: 'meta', textContent: `Completed for ${usd(j.amount)}. ${{ confirmed: 'You confirmed this amount.', disputed: "You reported a problem. The site owner will follow up by email." }[j.clientCheck] ?? 'Confirm the amount if it matches what you paid.'}` }),
+    j.status === 'complete' && h('p', { className: 'meta', textContent: `Completed for ${usd(j.amount)}. ${j.pct ? `Fee ${usd(j.fee)} (${j.pct}%) owed to CodeMarcer.` : 'No fee: requested during the free period.'}`.trim() }),
     actions, h('p', { className: 'msg', role: 'status' }));
 };
 const empty = text => h('li', { className: 'empty', textContent: text });
@@ -188,14 +169,13 @@ const loadMe = async () => {
   setMode(r, p);
   const open = jobs.filter(j => ACTIONS[j.status]).length;
   $$('.who').forEach(el => (el.textContent = `Signed in as ${p.name} (${p.email}). ${open ? `${open} open request${open > 1 ? 's' : ''}.` : 'No open requests.'}`));
-  if (r === 'engineer') fill(p), $('#jobs').replaceChildren(...jobs.map(job), ...(jobs.length ? [] : [empty('No requests yet. They appear here when a client hires you.')]));
-  else $('#requests-list').replaceChildren(...jobs.map(request), ...(jobs.length ? [] : [empty('No requests yet. Send one from Find an engineer.')]));
+  fill(p); $('#jobs').replaceChildren(...jobs.map(job), ...(jobs.length ? [] : [empty('No requests yet. They appear here when a client hires you.')]));
   return r;
 };
 
 for (const form of $$('.signin')) onSubmit(form, async () => {
   await api('/api/login', fields(form)); form.reset();
-  location.hash = (await loadMe()) === 'engineer' ? 'engineers' : 'requests';
+  await loadMe(); location.hash = 'engineers';
 });
 onSubmit(profile, async () => {
   const isNew = role !== 'engineer', { newPassword, ...b } = fields(profile), body = { ...b, available: profile.elements.available.checked, packages: readPkgs(), ...(!isNew && { password: newPassword }) };

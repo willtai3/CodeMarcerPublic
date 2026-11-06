@@ -1,6 +1,6 @@
 // Shared DOM helpers for the site and the admin page. Text only goes in via textContent/append, never innerHTML.
 export const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
-export const h = (tag, props = {}, ...kids) => { const el = Object.assign(document.createElement(tag), props); el.append(...kids.flat().filter(k => k != null && k !== false)); return el; };
+export const h = (tag, props = {}, ...kids) => { const el = Object.assign(document.createElement(tag), props); el.append(...kids.flat(Infinity).filter(k => k != null && k !== false)); return el; };
 
 export const api = async (path, body) => {
   const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
