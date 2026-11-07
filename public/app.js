@@ -27,14 +27,17 @@ const fields = form => Object.fromEntries([...new FormData(form)].filter(([k]) =
 // Search runs over one prepared text per engineer; only the first PAGE matches are drawn, more on request.
 const PAGE = 50;
 let engineers = [], index = [], lastList, matches = [], limit = PAGE;
+// /e/<slug> is one engineer's own page (the link they share): just their card.
+const solo = /^\/e\/([a-z0-9-]+)\/?$/.exec(location.pathname)?.[1];
+if (solo) { $('#solo-back').hidden = false; $('.search').hidden = true; }
 const words = () => $('#q').value.toLowerCase().split(/[,\s]+/).filter(Boolean);
 // "Show more" appends the next page under the cards already drawn, so an open hire form stays open.
 const moreRow = () => { const rest = matches.length - limit; return rest > 0 ? [h('li', { className: 'more' }, h('button', { className: 'quiet', type: 'button', textContent: `Show ${Math.min(rest, PAGE)} more of ${rest}`, onclick: e => { e.currentTarget.closest('li').remove(); $('#list').append(...matches.slice(limit, limit += PAGE).map(card), ...moreRow()); } }))] : []; };
 const renderList = () => {
   const q = words();
-  matches = q.length ? engineers.filter((e, i) => q.every(w => index[i].includes(w))) : engineers; limit = PAGE;
+  matches = solo ? engineers.filter(e => e.slug === solo) : q.length ? engineers.filter((e, i) => q.every(w => index[i].includes(w))) : engineers; limit = PAGE;
   $('#list').replaceChildren(...matches.slice(0, limit).map(card), ...moreRow(),
-    ...(matches.length ? [] : [h('li', { className: 'empty', textContent: engineers.length ? 'No engineers match that search.' : 'No engineers listed yet.' })]));
+    ...(matches.length ? [] : [h('li', { className: 'empty', textContent: solo ? "This engineer isn't listed anymore." : engineers.length ? 'No engineers match that search.' : 'No engineers listed yet.' })]));
 };
 const loadList = async () => {
   try {
@@ -50,7 +53,7 @@ const card = e => {
   const slot = h('div', { className: 'hire-slot' });
   const hire = (choice, label) => e.available && h('button', { className: 'small', type: 'button', textContent: label, onclick: () => openHire(e, choice, slot) });
   return h('li', { className: 'card' },
-    h('div', {}, h('strong', { textContent: e.name }), h('p', { className: 'meta', textContent: e.headline })),
+    h('div', {}, h('a', { className: 'name', href: `/e/${e.slug}`, textContent: e.name }), e.verified && h('span', { className: 'verified', textContent: 'Verified', title: 'CodeMarcer checked their portfolio' }), h('p', { className: 'meta', textContent: e.headline })),
     h('div', { className: 'chips' }, e.skills.map(t => h('span', { className: 'chip', textContent: t }))),
     h('p', { className: 'meta', textContent: [e.rate && `${usd(e.rate)}/hour`, `Paid ${e.terms.toLowerCase()}`, !e.available && 'Not taking new work right now'].filter(Boolean).join(' · ') }),
     e.packages.length > 0 && h('ul', { className: 'pkgs' }, e.packages.map((p, i) => h('li', {},
@@ -126,7 +129,7 @@ const setMode = p => {
   $('#editing').hidden = !p; profile.elements.email.readOnly = !!p;
   $('#profile-intro').textContent = p ? 'Your listing, as clients see it on the Find an engineer tab.' : 'List yourself with your rate and packages. No account needed.';
   $('#profile-save').textContent = p ? 'Save changes' : 'List me';
-  if (p) $('#who').textContent = `Editing the listing for ${p.name} (${p.email}).`, fill(p), drawRemove(); else clear();
+  if (p) $('#who').textContent = `Editing the listing for ${p.name} (${p.email}).`, Object.assign($('#public-link'), { href: `/e/${p.slug}`, textContent: `${location.origin}/e/${p.slug}` }), fill(p), drawRemove(); else clear();
 };
 const drawRemove = () => $('#remove-slot').replaceChildren(h('button', { className: 'quiet', type: 'button', textContent: 'Remove my listing', onclick: () => {
   $('#remove-slot').replaceChildren(h('span', { textContent: 'Remove your listing for good?' }), h('button', { className: 'small danger', type: 'button', textContent: 'Remove', onclick: async e => {

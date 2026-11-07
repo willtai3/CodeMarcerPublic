@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -215,6 +216,16 @@ func (sv *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.HasPrefix(path, "/e/") {
+		page, found := sv.profilePage(path[len("/e/"):])
+		w.Header().Set("Content-Type", types["html"])
+		w.Header().Set("Cache-Control", "no-cache")
+		if !found {
+			w.WriteHeader(http.StatusNotFound) // the page still loads and says the engineer isn't listed
+		}
+		w.Write(page)
+		return
+	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		if body, found := sv.static[path]; found {
 			w.Header().Set("Content-Type", types[files[path][strings.LastIndex(files[path], ".")+1:]])
@@ -313,6 +324,28 @@ func mailerFrom(site, conn, from string) (Mailer, error) {
 	return logMailer{}, nil
 }
 
+// The home page's default title and description, swapped for an engineer's on /e/<slug> so shared links preview with
+// their name and headline. main() checks the page still contains them.
+const (
+	homeTitle = "<title>CodeMarcer</title>"
+	homeOG    = `<meta property="og:title" content="CodeMarcer">`
+	homeDesc  = "Hire a software engineer to finish, fix and ship the app you built with AI. Engineers list their rate and fixed-price packages."
+)
+
+func (sv *server) profilePage(slug string) ([]byte, bool) {
+	sv.api.st.mu.RLock()
+	name, headline, found := sv.api.profilePage(slug)
+	sv.api.st.mu.RUnlock()
+	page := string(sv.static["/"])
+	if !found {
+		return []byte(page), false
+	}
+	title := html.EscapeString(name + " · CodeMarcer")
+	page = strings.Replace(page, homeTitle, "<title>"+title+"</title>", 1)
+	page = strings.Replace(page, homeOG, `<meta property="og:title" content="`+title+`">`, 1)
+	return []byte(strings.ReplaceAll(page, homeDesc, html.EscapeString(headline+". Hire "+name+" on CodeMarcer: fixed-price packages or hourly work, paid directly."))), true
+}
+
 func env(k, fallback string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
@@ -345,6 +378,9 @@ func main() {
 		if sv.static[route], err = publicFS.ReadFile("public/" + name); err != nil {
 			log.Fatalf("missing page %s: %v", name, err)
 		}
+	}
+	if home := string(sv.static["/"]); !strings.Contains(home, homeTitle) || !strings.Contains(home, homeOG) || strings.Count(home, homeDesc) != 2 {
+		log.Fatal("index.html no longer has the default title and description that engineer pages replace")
 	}
 	go func() {
 		for range time.Tick(10 * time.Minute) {

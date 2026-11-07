@@ -520,3 +520,147 @@ func TestFailedWriteAnswers500(t *testing.T) {
 		t.Errorf("listing on a full disk: status %d, %d engineers", r.Status, len(st.engineers))
 	}
 }
+
+// Public pages: /e/<slug>, from the name plus enough of the id to be unique, kept when the name changes.
+func TestSlugs(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	cases := map[string]string{"Maya R.": "maya-r-3f2a", "  José Núñez!! ": "jos-n-ez-3f2a", "王小明": "engineer-3f2a", "A very long name that goes on and on and on": "a-very-long-name-that-goes-on-3f2a"}
+	for name, want := range cases {
+		if got := st.slugFor(name, "3f2a9c1e-0000-4000-8000-000000000000"); got != want {
+			t.Errorf("%q: %q, want %q", name, got, want)
+		}
+	}
+	st.engineers["x"] = &Engineer{ID: "x", Slug: "maya-r-3f2a"}
+	if got := st.slugFor("Maya R.", "3f2a9c1e-0000-4000-8000-000000000000"); got != "maya-r-3f2a9" {
+		t.Errorf("taken slug: %q, want one more character of the id", got)
+	}
+	a := NewAPI(st, t.TempDir(), &memMail{}, "https://codemarcer.test")
+	mm := a.mail.(*memMail)
+	a.routes["POST /api/engineers"](with(engineerBody(), "email", "new@example.com"), nil)
+	e := st.byEmail["new@example.com"]
+	if !strings.HasPrefix(e.Slug, "maya-r-") || !strings.Contains(mm.sent[0].text, "https://codemarcer.test/e/"+e.Slug+"\n") {
+		t.Fatalf("slug %q; email %q", e.Slug, mm.sent[0].text)
+	}
+	slug := e.Slug
+	a.routes["POST /api/listing/save"](with(with(engineerBody(), "key", mm.key(t, 0)), "name", "Maya Rivera"), nil)
+	if e.Name != "Maya Rivera" || e.Slug != slug {
+		t.Errorf("rename changed the public address: %q → %q", slug, e.Slug)
+	}
+	if r := a.routes["POST /api/listing/save"](with(with(engineerBody(), "key", mm.key(t, 0)), "slug", "admin"), nil); r.Status != 200 || e.Slug != slug {
+		t.Errorf("the slug can be set from the edit form: %q", e.Slug)
+	}
+}
+
+// /e/<slug> serves the page with the engineer's name and headline in the title and link previews, escaped.
+func TestProfilePage(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(dir)
+	sv := &server{api: NewAPI(st, dir, &memMail{}, "https://codemarcer.test"), static: map[string][]byte{}, hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
+	home, _ := publicFS.ReadFile("public/index.html")
+	sv.static["/"] = home
+	sv.api.routes["POST /api/engineers"](with(with(engineerBody(), "name", `Eve <script>alert(1)</script>`), "headline", `Fixes "apps" & more`), nil)
+	e := st.byEmail["maya@example.com"]
+	get := func(p string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		sv.ServeHTTP(w, httptest.NewRequest("GET", p, nil))
+		return w
+	}
+	w := get("/e/" + e.Slug)
+	page := w.Body.String()
+	if w.Code != 200 || !strings.Contains(page, "<title>Eve &lt;script&gt;alert(1)&lt;/script&gt; · CodeMarcer</title>") || !strings.Contains(page, `<meta property="og:description" content="Fixes &#34;apps&#34; &amp; more. Hire Eve`) || strings.Contains(page, "<script>alert") {
+		t.Errorf("%d\n%s", w.Code, page[:900])
+	}
+	if w.Header().Get("Content-Security-Policy") == "" || w.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Error("engineer pages miss the security headers or content type")
+	}
+	for _, p := range []string{"/e/nobody-1234", "/e/", "/e/" + e.Slug + "/../admin"} {
+		if w := get(p); w.Code != 404 || !strings.Contains(w.Body.String(), homeTitle) {
+			t.Errorf("%s: %d", p, w.Code)
+		}
+	}
+	change(st, e, func(e *Engineer) { e.Hidden = true })
+	if get("/e/"+e.Slug).Code != 404 {
+		t.Error("a hidden engineer's page still shows them")
+	}
+	if strings.Count(string(home), homeDesc) != 2 || !strings.Contains(string(home), homeTitle) || !strings.Contains(string(home), homeOG) {
+		t.Error("index.html lost the default title or description")
+	}
+}
+
+// Each hire request is emailed to the engineer (at most 20 a day each); a failed email doesn't fail the request.
+func TestRequestEmails(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	mm := &memMail{}
+	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test")
+	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	a.routes["POST /api/engineers"](engineerBody(), nil)
+	e := st.byEmail["maya@example.com"]
+	hire := func(extra B) Result {
+		b := B{"engineerId": e.ID, "choice": "hourly", "hours": "3", "clientName": "Ann", "clientEmail": "ann@example.com", "clientPhone": "5551234567", "details": "Login breaks after deploy.", "link": "https://github.com/ann/app"}
+		for k, v := range extra {
+			b[k] = v
+		}
+		return a.routes["POST /api/jobs"](b, nil)
+	}
+	if r := hire(nil); r.Status != 201 || len(mm.sent) != 2 {
+		t.Fatalf("%d, %d emails", r.Status, len(mm.sent))
+	}
+	m := mm.sent[1]
+	for _, want := range []string{"Hi Maya R.,", "What: Hourly work, about 3 hours ($360 at $120/hour)", "Email: ann@example.com", "Phone: 5551234567", "Link: https://github.com/ann/app", "Login breaks after deploy."} {
+		if !strings.Contains(m.text, want) {
+			t.Errorf("request email lacks %q:\n%s", want, m.text)
+		}
+	}
+	if m.to != "maya@example.com" || m.subject != "New request on CodeMarcer from Ann" {
+		t.Errorf("%s / %s", m.to, m.subject)
+	}
+	hire(B{"choice": "p0", "link": ""})
+	if !strings.Contains(mm.sent[2].text, "What: Deploy your app ($400, about 5 days)") || strings.Contains(mm.sent[2].text, "Link:") {
+		t.Errorf("package request email:\n%s", mm.sent[2].text)
+	}
+	for i := 0; i < 30; i++ {
+		hire(nil)
+	}
+	if len(mm.sent) != 1+askedPerDay {
+		t.Errorf("%d request emails in a day, want %d", len(mm.sent)-1, askedPerDay)
+	}
+	if len(st.jobs) != 32 {
+		t.Errorf("%d requests saved, want all 32", len(st.jobs))
+	}
+	clock = clock.Add(25 * time.Hour)
+	a.mail = failMail{}
+	if r := hire(nil); r.Status != 201 {
+		t.Errorf("a failed email failed the request: %d", r.Status)
+	}
+}
+
+type failMail struct{}
+
+func (failMail) Send(to, subject, text string) error { return errors.New("service down") }
+
+// Verified: staff mark it; a new name or portfolio clears it.
+func TestVerified(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	mm := &memMail{}
+	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test")
+	a.routes["POST /api/engineers"](engineerBody(), nil)
+	e := st.byEmail["maya@example.com"]
+	if r := a.routes["POST /api/listing/save"](with(with(engineerBody(), "key", mm.key(t, 0)), "verified", true), nil); r.Status != 200 || e.Verified {
+		t.Fatal("an engineer verified themselves")
+	}
+	save := func(k string, v any) {
+		a.routes["POST /api/listing/save"](with(with(engineerBody(), "key", mm.key(t, 0)), k, v), nil)
+	}
+	for _, c := range []struct {
+		k     string
+		v     any
+		keeps bool
+	}{{"headline", "A different headline", true}, {"portfolio", "https://github.com/other", false}, {"name", "Someone Else", false}} {
+		e.Verified = true
+		save(c.k, c.v)
+		if e.Verified != c.keeps {
+			t.Errorf("changing %s: verified %v, want %v", c.k, e.Verified, c.keeps)
+		}
+	}
+}

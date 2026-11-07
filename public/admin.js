@@ -54,6 +54,7 @@ const render = ({ me, engineers, clients, jobs, staff }) => {
 
   $('#roster').replaceChildren(list('engineers', [
     { label: 'Engineer', always: true, cell: e => contactCell(e, h('p', { className: 'meta', textContent: e.headline })) },
+    { label: 'Verified', on: true, cell: e => h('span', { className: 'inline' }, e.verified ? 'Yes' : 'No', small(e.verified ? 'Unverify' : 'Verify', act('/api/admin/verify', { id: e.id, verified: !e.verified }, `${e.name} is ${e.verified ? 'no longer' : 'now'} marked verified.`))) },
     { label: 'Listing', always: true, cell: e => h('span', { className: 'inline' }, e.hidden ? 'Hidden' : e.available ? 'Live' : 'Live, not taking work', small(e.hidden ? 'Show' : 'Hide', act('/api/admin/hide', { id: e.id, hidden: !e.hidden }, `${e.name} is now ${e.hidden ? 'shown' : 'hidden'} on the site.`))) },
     { label: 'Skills', on: true, cell: e => e.skills.join(', ') },
     { label: 'Pricing', cell: e => [e.rate ? `${usd(e.rate)}/hour` : 'No hourly rate', h('br'), plural(e.packages.length, 'package'), e.payWith && h('p', { className: 'meta', textContent: `Paid by ${e.payWith}` })] },

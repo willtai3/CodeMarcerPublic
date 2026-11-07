@@ -40,7 +40,11 @@ export const login = async base => cookieOf(await post(base, '/api/admin/login',
 
 // Running locally, emails are written to the server log. keyFor returns the edit key from the latest one sent to email
 // (the part after #edit= in the link), or null.
-export const keyFor = (srv, email) => [...srv.stderr().matchAll(/mail to (\S+): [^\n]*\n[\s\S]*?#edit=([0-9a-f-]+\.[A-Za-z0-9_-]{43})/g)].filter(m => m[1] === email).at(-1)?.[2] ?? null;
-export const mailsTo = (srv, email) => [...srv.stderr().matchAll(/mail to (\S+):/g)].filter(m => m[1] === email).length;
+// Each email in the log, as [to, text] (the log splits them at "mail to <address>:").
+const mails = srv => srv.stderr().split(/^\S+ \S+ mail to /m).slice(1).map(m => [m.slice(0, m.indexOf(':')), m]);
+// Both wait until the log has stopped growing, since it reaches the test a moment after the reply.
+const settled = async srv => { for (let n = -1; n !== srv.stderr().length;) { n = srv.stderr().length; await new Promise(r => setTimeout(r, 40)); } };
+export const keyFor = async (srv, email) => (await settled(srv), mails(srv)).filter(([to, m]) => to === email && m.includes('#edit=')).map(([, m]) => /#edit=([0-9a-f-]+\.[A-Za-z0-9_-]{43})/.exec(m)[1]).at(-1) ?? null;
+export const mailsTo = async (srv, email, kind = 'edit link') => (await settled(srv), mails(srv)).filter(([to, m]) => to === email && m.includes(kind === 'edit link' ? '#edit=' : 'sent you a request')).length;
 
 export const ENGINEER = { name: 'Maya R.', email: 'maya@example.com', phone: '(555) 010-2030', headline: 'I take AI-built web apps to production', skills: 'Next, Supabase, Stripe, React', rate: '120', packages: [{ title: 'Deploy your app with HTTPS', price: '400', days: '5', details: 'Hosting, domain and HTTPS' }], payWith: 'Venmo @maya-r', terms: 'Half upfront, half on completion', portfolio: 'https://github.com/maya', about: '', available: true };

@@ -70,10 +70,15 @@ let maya, mayaKey;
 test('engineer lists with email and phone, no password; live at once; edit link emailed; public profile hides private fields', async () => {
   const r = await post(base, '/api/engineers', ENGINEER);
   assert.deepEqual([r.status, await json(r), r.headers.get('set-cookie')], [201, { sent: true }, null], 'no account, no session');
-  mayaKey = keyFor(srv, 'maya@example.com');
+  mayaKey = (await keyFor(srv, 'maya@example.com'));
   assert.ok(mayaKey, 'edit link emailed');
   maya = (await json(await get('/api/engineers'))).find(e => e.name === 'Maya R.');
-  assert.deepEqual(Object.keys(maya).sort(), ['about', 'available', 'created', 'headline', 'id', 'name', 'packages', 'portfolio', 'rate', 'skills', 'terms']);
+  assert.deepEqual(Object.keys(maya).sort(), ['about', 'available', 'created', 'headline', 'id', 'name', 'packages', 'portfolio', 'rate', 'skills', 'slug', 'terms', 'verified']);
+  assert.match(maya.slug, /^maya-r-[0-9a-f]{4,}$/);
+  const page = await get('/e/' + maya.slug);
+  assert.deepEqual([page.status, /<title>Maya R\. · CodeMarcer<\/title>/.test(await page.text())], [200, true], 'public page with their name in the title');
+  assert.match(page.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.equal((await get('/e/nobody-0000')).status, 404);
   assert.ok(mayaKey.startsWith(maya.id + '.'));
   for (const [patch, field] of [[{ phone: '' }, 'phone'], [{ phone: '12345' }, 'phone'], [{ email: 'nope' }, 'email'], [{ rate: '', packages: [] }, 'pricing']])
     assert.deepEqual(await json(await post(base, '/api/engineers', { ...ENGINEER, email: 'x@example.com', ...patch })), { error: field }, JSON.stringify(patch));
@@ -81,7 +86,7 @@ test('engineer lists with email and phone, no password; live at once; edit link 
   const again = await post(base, '/api/engineers', { ...ENGINEER, email: 'MAYA@example.com', name: 'Impostor' });
   assert.deepEqual([again.status, await json(again)], [201, { sent: true }]);
   assert.deepEqual((await json(await get('/api/engineers'))).map(e => e.name), ['Maya R.']);
-  assert.equal(mailsTo(srv, 'maya@example.com'), 1, 'at most one link per 10 minutes');
+  assert.equal((await mailsTo(srv, 'maya@example.com')), 1, 'at most one link per 10 minutes');
   // Two listings with the same new email at the same moment: exactly one is made.
   await Promise.all([1, 2].map(() => post(base, '/api/engineers', { ...ENGINEER, name: 'Quokka Twin', email: 'twin@example.com' })));
   assert.equal((await json(await get('/api/engineers'))).filter(e => e.name === 'Quokka Twin').length, 1);
@@ -101,12 +106,12 @@ test('edit link: opens, saves and removes the listing; the email stays fixed; a 
   // "Email me my edit link": same answer for unknown emails; the new link replaces the old one.
   for (const email of ['nobody@example.com', 'maya@example.com']) assert.deepEqual(await json(await post(base, '/api/edit-link', { email })), { ok: true });
   assert.deepEqual(await json(await post(base, '/api/edit-link', { email: 'not an email' })), { error: 'email' });
-  assert.equal(mailsTo(srv, 'nobody@example.com'), 0);
-  assert.equal(keyFor(srv, 'maya@example.com'), mayaKey, 'within 10 minutes of the last link, nothing is sent and the link still works');
+  assert.equal((await mailsTo(srv, 'nobody@example.com')), 0);
+  assert.equal((await keyFor(srv, 'maya@example.com')), mayaKey, 'within 10 minutes of the last link, nothing is sent and the link still works');
 
   const dev = { ...ENGINEER, name: 'Dev', email: 'dev@example.com' };
   await post(base, '/api/engineers', dev);
-  const devKey = keyFor(srv, 'dev@example.com');
+  const devKey = (await keyFor(srv, 'dev@example.com'));
   assert.equal((await post(base, '/api/listing/remove', { key: devKey.split('.')[0] + '.' + mayaKey.split('.')[1] })).status, 401, "Maya's secret doesn't open Dev's listing");
   assert.deepEqual(await json(await post(base, '/api/listing/remove', { key: devKey })), { ok: true });
   assert.ok(!(await json(await get('/api/engineers'))).some(e => e.name === 'Dev'));
@@ -123,6 +128,7 @@ test('hiring needs no account: name, email, phone and a description; the enginee
   assert.equal(r.headers.get('set-cookie'), null, 'no account or session for clients');
   assert.deepEqual(await json(r), { engineer: { name: 'Maya R.', email: 'maya@example.com', phone: '+1 555 010 9999', payWith: 'Venmo @maya-r', terms: 'Half upfront, half on completion' }, quote: 400 });
   assert.equal((await hire(maya.id, { choice: 'hourly', hours: '3', clientPhone: '+1 555 987 6543' })).status, 201, 'same client again, no sign-in needed');
+  assert.equal((await mailsTo(srv, 'maya@example.com', 'request')), 2, 'each real request is emailed to the engineer; the honeypot one is not');
 });
 
 test('staff roles: owner manages the team; admin sees money but not the team; moderator only hides; changes apply at once', async () => {
@@ -155,6 +161,11 @@ test('staff roles: owner manages the team; admin sees money but not the team; mo
   assert.ok(!(await json(await get('/api/engineers'))).some(e => e.id === maya.id));
   assert.equal((await hire(maya.id)).status, 404, 'hidden engineers can not be hired');
   assert.equal((await post(base, '/api/admin/hide', { id: maya.id, hidden: false }, as(moC))).status, 200);
+  // Moderators mark engineers verified after checking their portfolio; the badge shows on the public profile.
+  assert.deepEqual(await json(await post(base, '/api/admin/verify', { id: maya.id, verified: 'yes' }, as(moC))), { error: 'verified' });
+  assert.equal((await post(base, '/api/admin/verify', { id: maya.id, verified: true })).status, 401);
+  assert.equal((await post(base, '/api/admin/verify', { id: maya.id, verified: true }, as(moC))).status, 200);
+  assert.equal((await json(await get('/api/engineers'))).find(e => e.id === maya.id).verified, true);
   assert.equal((await add({ email: 'x@example.com' }, moC)).status, 403);
 
   d = await json(await get('/api/admin/data', alC));
@@ -205,7 +216,7 @@ test('rate limits: 10 accepted listings/requests per hour (rejected ones free), 
     for (let i = 0; i < 10; i++) assert.equal((await post(s.base, '/api/edit-link', { email: `nobody${i}@x.co` })).status, 200);
     assert.equal((await post(s.base, '/api/edit-link', { email: 'e1@x.co' })).status, 429, 'link emails share a limit');
     for (let i = 0; i < 60; i++) await post(s.base, '/api/listing', { key: 'x.' + 'A'.repeat(43) });
-    assert.equal((await post(s.base, '/api/listing', { key: keyFor(s, 'e1@x.co') })).status, 429, 'guessing edit links is limited');
+    assert.equal((await post(s.base, '/api/listing', { key: (await keyFor(s, 'e1@x.co')) })).status, 429, 'guessing edit links is limited');
     for (let i = 0; i < 10; i++) await post(s.base, '/api/admin/login', { email: 'a@x.co', password: 'wrong password!' });
     assert.equal((await post(s.base, '/api/admin/login', ADMIN)).status, 429);
   } finally { await s.stop(); }

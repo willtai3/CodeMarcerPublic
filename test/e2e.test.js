@@ -66,7 +66,7 @@ test('engineer lists themselves with email and phone, no password: pricing requi
   await f.getByRole('button', { name: 'List me' }).click(); // empty extra rows are dropped
   await f.getByText(/^You're listed\. We've emailed a private link to edit or remove your listing to maya@example\.com\./).waitFor();
   assert.equal(await f.locator('[name="name"]').inputValue(), '', 'the form is cleared for the next person');
-  assert.ok(keyFor(srv, 'maya@example.com'), 'the edit link was emailed');
+  assert.ok((await keyFor(srv, 'maya@example.com')), 'the edit link was emailed');
 
   await page.getByRole('tab', { name: 'Find an engineer' }).click();
   await page.locator('.card', { hasText: 'Maya R.' }).waitFor();
@@ -122,12 +122,13 @@ test('client hires without an account: search, cancel, hourly quote, name/email/
 });
 
 test('edit link: opens the listing, leaves the address bar, saves, emails a new link; a bad link says so; remove with confirm', async () => {
-  const { page, done } = await open('/#edit=' + keyFor(srv, 'maya@example.com'));
+  const { page, done } = await open('/#edit=' + (await keyFor(srv, 'maya@example.com')));
   await page.getByText('Editing the listing for Maya R. (maya@example.com).').waitFor();
   assert.equal(new URL(page.url()).hash, '#engineers', 'the secret is taken out of the address bar');
   const f = page.locator('#profile');
   assert.equal(await f.locator('[name="email"]').getAttribute('readonly'), '', 'the email is fixed');
   assert.equal(await f.locator('[name="phone"]').inputValue(), '(555) 010-2030');
+  assert.match(await page.locator('#public-link').textContent(), /^http:\/\/127\.0\.0\.1:\d+\/e\/maya-r-[0-9a-f]{4,}$/, 'their shareable page');
   assert.equal(await page.locator('#relink').isHidden(), true);
   await shot(page, 'desktop-edit');
   await f.locator('[name="headline"]').fill('Production-ready AI apps in a week');
@@ -151,12 +152,12 @@ test('edit link: opens the listing, leaves the address bar, saves, emails a new 
   await relink.getByRole('button', { name: 'Email me my edit link' }).click();
   await relink.getByText('If maya@example.com is listed, a new link is on its way and older links stop working. One email per 10 minutes.').waitFor();
 
-  await page.goto(srv.base + '/#edit=' + keyFor(srv, 'maya@example.com').split('.')[0] + '.' + 'A'.repeat(43));
+  await page.goto(srv.base + '/#edit=' + (await keyFor(srv, 'maya@example.com')).split('.')[0] + '.' + 'A'.repeat(43));
   await relink.getByText('This edit link no longer works. Get a new one with "Email me my edit link" below.').waitFor();
   await f.getByRole('button', { name: 'List me' }).waitFor();
 
   await post(srv.base, '/api/engineers', { ...ENGINEER, name: 'Dev', email: 'dev@example.com' });
-  await page.goto(srv.base + '/#edit=' + keyFor(srv, 'dev@example.com')); // a link opened while the page is open
+  await page.goto(srv.base + '/#edit=' + (await keyFor(srv, 'dev@example.com'))); // a link opened while the page is open
   await page.getByText('Editing the listing for Dev (dev@example.com).').waitFor();
   await page.getByRole('button', { name: 'Remove my listing' }).click();
   await page.getByText('Remove your listing for good?').waitFor();
@@ -248,6 +249,33 @@ test('staff: owner adds a moderator and an admin, moderator sees only engineers,
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.locator('#login [name="password"]').waitFor();
   await done(/status of (400|401)/);
+});
+
+test("engineer's own page: staff verify them; /e/<slug> shows just their card with the badge; names link there", async () => {
+  const a = await open('/admin');
+  await fillAll(a.page.locator('#login'), ADMIN); await a.page.getByRole('button', { name: 'Sign in' }).click();
+  const row = a.page.locator('#roster tbody tr', { hasText: 'Maya R.' });
+  await row.getByRole('button', { name: 'Verify', exact: true }).click();
+  await a.page.getByText('Maya R. is now marked verified.').waitFor();
+  await row.getByRole('button', { name: 'Unverify' }).waitFor();
+  await a.done();
+
+  const { page, done } = await open('/');
+  await page.locator('.card', { hasText: 'Maya R.' }).getByText('Verified', { exact: true }).waitFor();
+  await page.locator('.card').getByRole('link', { name: 'Maya R.' }).click();
+  await page.waitForURL(/\/e\/maya-r-[0-9a-f]{4,}$/);
+  await page.getByRole('link', { name: '← All engineers' }).waitFor();
+  assert.equal(await page.title(), 'Maya R. · CodeMarcer');
+  assert.equal(await page.locator('#list .card').count(), 1, 'only their card');
+  assert.equal(await page.locator('.search').isHidden(), true);
+  await page.locator('.card').getByRole('button', { name: 'Hire by the hour' }).waitFor();
+  await shot(page, 'desktop-engineer-page');
+  await page.goto(srv.base + '/e/nobody-0000');
+  await page.getByText("This engineer isn't listed anymore.").waitFor();
+  await page.getByRole('link', { name: '← All engineers' }).click();
+  await page.waitForURL(srv.base + '/');
+  await page.locator('.card', { hasText: 'Maya R.' }).waitFor();
+  await done(/status of 404/); // the page for an engineer who isn't listed
 });
 
 test('phone: no sideways scroll on every tab and the hire form; screenshots', async () => {

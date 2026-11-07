@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -42,6 +43,8 @@ type Engineer struct {
 	About     *string   `json:"about"`
 	Available bool      `json:"available"`
 	Hidden    bool      `json:"hidden"`
+	Slug      string    `json:"slug"`              // the public page: /e/<slug>; kept when the name changes so shared links keep working
+	Verified  bool      `json:"verified"`          // staff checked their portfolio; cleared when the portfolio or name changes
 	EditKey   string    `json:"editKey,omitempty"` // SHA-256 of the private edit link's secret; a new link replaces it
 }
 
@@ -121,6 +124,9 @@ func OpenStore(dir string) (*Store, error) {
 				return nil, err
 			}
 			s.engineers[e.ID], s.byEmail[e.Email] = e, e
+			if e.Slug == "" {
+				e.Slug = s.slugFor(e.Name, e.ID)
+			}
 		case "staff":
 			x := &Staff{}
 			if err := json.Unmarshal(r, x); err != nil {
@@ -194,6 +200,35 @@ func (s *Store) commit(undo func()) error {
 func (s *Store) addEngineer(e *Engineer) error {
 	s.engineers[e.ID], s.byEmail[e.Email] = e, e
 	return s.commit(func() { delete(s.engineers, e.ID); delete(s.byEmail, e.Email) })
+}
+
+// slugFor: the name in lower-case letters and digits, then enough of the id to be unique ("maya-r-3f2a").
+func (s *Store) slugFor(name, id string) string {
+	var b []byte
+	for _, r := range strings.ToLower(name) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b = append(b, byte(r))
+		} else if len(b) > 0 && b[len(b)-1] != '-' {
+			b = append(b, '-')
+		}
+		if len(b) >= 30 {
+			break
+		}
+	}
+	base, hexID := strings.Trim(string(b), "-"), strings.ReplaceAll(id, "-", "")
+	if base == "" {
+		base = "engineer"
+	}
+	for n := min(4, len(hexID)); ; n++ {
+		slug := strings.TrimSuffix(base+"-"+hexID[:n], "-")
+		taken := false
+		for _, e := range s.engineers {
+			taken = taken || (e.Slug == slug && e.ID != id)
+		}
+		if !taken || n >= len(hexID) {
+			return slug
+		}
+	}
 }
 
 // removeEngineer deletes a listing; their past requests stay in the ledger under "(removed)".

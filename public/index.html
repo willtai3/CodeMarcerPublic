@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CodeMarcer</title>
 <meta name="description" content="Hire a software engineer to finish, fix and ship the app you built with AI. Engineers list their rate and fixed-price packages.">
+<meta property="og:title" content="CodeMarcer">
+<meta property="og:description" content="Hire a software engineer to finish, fix and ship the app you built with AI. Engineers list their rate and fixed-price packages.">
+<meta property="og:type" content="website">
 <link rel="icon" href="/favicon.svg">
 <link rel="stylesheet" href="/styles.css">
 <script type="module" src="/app.js"></script>
@@ -29,12 +32,14 @@
   </nav>
 
   <section role="tabpanel" id="find" hidden>
+    <p id="solo-back" hidden><a href="/">← All engineers</a></p>
     <label class="search">Search by skill or name<input id="q" type="search" placeholder="next.js, stripe, react native" autocomplete="off"></label>
     <ul class="board" id="list"></ul>
   </section>
 
   <section role="tabpanel" id="engineers" hidden>
     <div class="row-between" id="editing" hidden><span id="who"></span><button class="quiet" type="button" id="stop-edit">Done</button></div>
+    <p id="public-page" data-edit hidden>Your public page, to share anywhere: <a id="public-link"></a></p>
 
     <form id="profile" novalidate>
       <p id="profile-intro"></p>
@@ -72,6 +77,6 @@
 
   <datalist id="stacks"><option value="react"><option value="next.js"><option value="node"><option value="python"><option value="typescript"><option value="supabase"><option value="firebase"><option value="postgres"><option value="stripe"><option value="react native"><option value="flutter"><option value="swift"><option value="aws"><option value="azure"><option value="vercel"><option value="tailwind"><option value="openai"></datalist>
 </main>
-<footer>CodeMarcer lists engineers and passes on requests. It doesn't employ, vet or vouch for engineers and doesn't handle payments. Agree scope, price and ownership of the code in writing before you pay. The source code is <a href="https://github.com/willtai3/CodeMarcerPublic" rel="noopener">public on GitHub</a>.</footer>
+<footer>CodeMarcer lists engineers and passes on requests. It doesn't employ engineers or handle payments. "Verified" means we checked their portfolio, not a guarantee of their work. Agree scope, price and ownership of the code in writing before you pay. The source code is <a href="https://github.com/willtai3/CodeMarcerPublic" rel="noopener">public on GitHub</a>.</footer>
 </body>
 </html>
