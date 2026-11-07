@@ -44,8 +44,9 @@ type API struct {
 	mail    Mailer
 	site    string // the site's address, for edit links
 	mailMu  sync.Mutex
-	mailed  map[string]time.Time   // when each address was last sent a link
-	asked   map[string][]time.Time // request emails sent to each engineer in the last day
+	sending map[string]bool // addresses with a link email on its way
+	sentAt  []time.Time     // emails sent in the last hour
+	work    sync.WaitGroup  // email work still running after its reply (tests wait for it)
 	st      *Store
 	now     func() time.Time
 	dataDir string
@@ -73,48 +74,105 @@ var (
 // is stored, and the part after # is never sent in requests, so it stays out of server logs.
 type mail struct{ to, subject, text string }
 
-// mailGap: an address gets at most one link per gap, so the form can't be used to flood someone's inbox.
+// mailGap: an address gets at most one link per gap, so the forms can't flood someone's inbox. The time is kept on the
+// listing, so a restart doesn't reset it.
 const mailGap = 10 * time.Minute
 
-// newLink makes a new edit link for e (the old one stops working) and the email that carries it; nil when this address
-// was sent a link too recently. Call with st.mu held for writing.
-func (a *API) newLink(e *Engineer, fresh bool) (*mail, error) {
-	a.mailMu.Lock()
-	now := a.now()
-	if last, seen := a.mailed[e.Email]; seen && !fresh && now.Sub(last) < mailGap {
-		a.mailMu.Unlock()
-		return nil, nil
+// linkLife: an edit link stops working after this; "Email me my edit link" sends a new one.
+const linkLife = 30 * 24 * time.Hour
+
+// The email service allows 100 emails an hour on a verified domain. The site stays under that, and stops sending
+// request emails earlier so edit links still get through.
+const (
+	mailPerHour    = 90
+	requestPerHour = 60
+	mailPerMinute  = 25
+)
+
+// linkMail: a new edit link for e and the email that carries it, plus the key to store once the email has gone out.
+// nil when this address was sent a link within mailGap or one is being sent now. Call with st.mu held.
+// later runs f after the reply, outside the store lock: email can be slow, and its timing mustn't show in the answer.
+func (a *API) later(f func()) {
+	a.work.Add(1)
+	go func() { defer a.work.Done(); f() }()
+}
+
+func (a *API) linkMail(e *Engineer, fresh bool) (*mail, string) {
+	if t, err := time.Parse(time.RFC3339, e.LinkSent); err == nil && !fresh && a.now().Sub(t) < mailGap {
+		return nil, ""
 	}
-	a.mailed[e.Email] = now
-	a.mailMu.Unlock()
+	a.mailMu.Lock()
+	defer a.mailMu.Unlock()
+	if a.sending[e.Email] {
+		return nil, ""
+	}
+	a.sending[e.Email] = true
 	secret := make([]byte, 32)
 	rand.Read(secret)
 	token := base64.RawURLEncoding.EncodeToString(secret)
-	if err := change(a.st, e, func(e *Engineer) { e.EditKey = keyOf(token) }); err != nil {
-		return nil, err
-	}
-	subject, text := editMail(e.Name, a.site+"/#edit="+e.ID+"."+token, a.site+"/e/"+e.Slug, fresh)
-	return &mail{e.Email, subject, text}, nil
+	subject, text := editMail(a.site+"/#edit="+e.ID+"."+token, a.site+"/e/"+e.Slug, fresh || e.Pending)
+	return &mail{e.Email, subject, text}, keyOf(token)
 }
 
-// askedPerDay: request emails per engineer per 24 hours. Past it, requests are still saved and shown to staff.
-const askedPerDay = 20
-
-// requestMail tells the engineer about a new request, or nil past askedPerDay. Call with st.mu held.
-func (a *API) requestMail(e *Engineer, j *Job) *mail {
-	a.mailMu.Lock()
-	defer a.mailMu.Unlock()
-	now, kept := a.now(), []time.Time{}
-	for _, t := range a.asked[e.ID] {
-		if now.Sub(t) < 24*time.Hour {
-			kept = append(kept, t)
+// deliverLink sends a link email and only then stores its key, so a failed email leaves the old link working and the
+// address free to ask again.
+func (a *API) deliverLink(id string, m *mail, key string) {
+	sent := a.sendWithin(m, mailPerHour)
+	a.st.mu.Lock()
+	if e := a.st.engineers[id]; sent && e != nil && e.Email == m.to {
+		if err := change(a.st, e, func(e *Engineer) { e.EditKey, e.LinkSent = key, a.now().UTC().Format(time.RFC3339) }); err != nil {
+			log.Printf("edit link emailed but not saved: %v", err)
 		}
 	}
-	if len(kept) >= askedPerDay {
-		a.asked[e.ID] = kept
-		return nil
+	a.st.mu.Unlock()
+	a.mailMu.Lock()
+	delete(a.sending, m.to)
+	a.mailMu.Unlock()
+}
+
+// sendWithin sends m unless the site has sent `limit` emails in the last hour (or mailPerMinute in the last minute).
+func (a *API) sendWithin(m *mail, limit int) bool {
+	a.mailMu.Lock()
+	now, hour, minute := a.now(), []time.Time{}, 0
+	for _, t := range a.sentAt {
+		if now.Sub(t) < time.Hour {
+			hour = append(hour, t)
+			if now.Sub(t) < time.Minute {
+				minute++
+			}
+		}
 	}
-	a.asked[e.ID] = append(kept, now)
+	a.sentAt = hour
+	if len(hour) >= limit || minute >= mailPerMinute {
+		a.mailMu.Unlock()
+		log.Printf("email to %s held back: the site's hourly email limit is reached", m.to)
+		return false
+	}
+	a.sentAt = append(a.sentAt, now)
+	a.mailMu.Unlock()
+	if err := a.mail.Send(m.to, m.subject, m.text); err != nil {
+		log.Printf("email not sent: %v", err)
+		return false
+	}
+	return true
+}
+
+// requestsPerDay: hire requests per engineer per 24 hours. It bounds how fast anyone can collect an engineer's contact
+// details and how many emails they get.
+const requestsPerDay = 20
+
+func (a *API) requestsToday(e *Engineer) int {
+	n, since := 0, a.now().Add(-24*time.Hour).UTC().Format("2006-01-02T15:04:05.000Z")
+	for _, j := range a.st.jobs {
+		if j.EngineerID == e.ID && j.Created > since {
+			n++
+		}
+	}
+	return n
+}
+
+// requestMail tells the engineer about a new request.
+func (a *API) requestMail(e *Engineer, j *Job) *mail {
 	what := fmt.Sprintf("%s ($%d, about %d day%s)", j.Choice.Title, j.Quote, j.Choice.Days, map[bool]string{true: "s"}[j.Choice.Days != 1])
 	if j.Choice.Type == "hourly" {
 		what = fmt.Sprintf("Hourly work, about %d hour%s ($%d at $%d/hour)", j.Choice.Hours, map[bool]string{true: "s"}[j.Choice.Hours != 1], j.Quote, j.Choice.Rate)
@@ -148,24 +206,15 @@ func keyOf(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// send delivers m outside the store lock; false when the email service refused it.
-func (a *API) send(m *mail) bool {
-	if m == nil {
-		return true
-	}
-	if err := a.mail.Send(m.to, m.subject, m.text); err != nil {
-		log.Printf("edit link email not sent: %v", err)
-		return false
-	}
-	return true
-}
-
 // byLink finds the engineer whose edit link is in b["key"]. Call with st.mu held.
 func (a *API) byLink(b B) *Engineer {
 	key, _ := b["key"].(string)
 	id, token, _ := strings.Cut(key, ".")
 	e := a.st.engineers[id]
 	if e == nil || e.EditKey == "" || len(token) != 43 || subtle.ConstantTimeCompare([]byte(keyOf(token)), []byte(e.EditKey)) != 1 {
+		return nil
+	}
+	if t, err := time.Parse(time.RFC3339, e.LinkSent); err != nil || a.now().Sub(t) > linkLife {
 		return nil
 	}
 	return e
@@ -233,7 +282,7 @@ func (a *API) directory() []publicProfile {
 	}
 	list := []publicProfile{}
 	for _, e := range a.st.engineers {
-		if !e.Hidden {
+		if !e.Hidden && !e.Pending {
 			list = append(list, publicProfile{e.ID, e.Name, e.Headline, e.Skills, e.Rate, e.Packages, e.Terms, e.Portfolio, e.About, e.Available, e.Verified, e.Slug, e.Created})
 		}
 	}
@@ -250,7 +299,7 @@ func (a *API) directory() []publicProfile {
 var hireSpec = []check{{"clientName", strOf(1, 80, false)}, {"clientEmail", emailOf}, {"clientPhone", phoneOf}, {"details", strOf(10, 2000, true)}, {"link", opt(linkOf)}}
 
 func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
-	a := &API{mail: m, site: strings.TrimRight(site, "/"), mailed: map[string]time.Time{}, asked: map[string][]time.Time{}, st: st, now: time.Now, dataDir: dataDir}
+	a := &API{mail: m, site: strings.TrimRight(site, "/"), sending: map[string]bool{}, st: st, now: time.Now, dataDir: dataDir}
 	a.routes = map[string]handler{
 		"GET /api/engineers": func(b B, s *Session) Result {
 			st.mu.RLock()
@@ -258,30 +307,39 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 			return ok(a.directory())
 		},
 
-		// A new listing goes live at once; the engineer gets a private edit link by email. An email that is already
-		// listed gets a fresh link instead, with the same answer, so the form doesn't reveal who is listed.
+		// A new listing waits, unseen, until the engineer opens the emailed link and publishes it: that proves the
+		// email is theirs, so nobody can list someone else's address with their own phone and payment details. Until
+		// then the latest details sent for that email win. An email that is already published gets a new link
+		// instead. The answer is always the same and comes before any email is sent, so neither its content nor its
+		// timing shows who is listed.
 		"POST /api/engineers": func(b B, s *Session) Result {
 			e, bad := profileOf(b, true)
 			if bad != "" {
 				return fail(400, bad)
 			}
 			st.mu.Lock()
+			defer st.mu.Unlock()
 			to, fresh := st.byEmail[e.Email], false
-			if to == nil {
-				e.ID, e.Kind, e.Created = newID(), "engineer", a.stamp()
+			switch {
+			case to == nil:
+				e.ID, e.Kind, e.Created, e.Pending, e.Hidden = newID(), "engineer", a.stamp(), true, st.blocked[e.Email] != nil
 				e.Slug = st.slugFor(e.Name, e.ID)
 				if err := st.addEngineer(e); err != nil {
-					st.mu.Unlock()
 					return fail(500, "server")
 				}
 				to, fresh = e, true
+			case to.Pending:
+				if err := change(st, to, func(t *Engineer) {
+					t.Name, t.Phone, t.Headline, t.Skills, t.Rate, t.Packages, t.PayWith, t.Terms, t.Portfolio, t.About, t.Available = e.Name, e.Phone, e.Headline, e.Skills, e.Rate, e.Packages, e.PayWith, e.Terms, e.Portfolio, e.About, e.Available
+				}); err != nil {
+					return fail(500, "server")
+				}
 			}
-			m, err := a.newLink(to, fresh)
-			st.mu.Unlock()
-			if err != nil {
-				return fail(500, "server")
+			if m, key := a.linkMail(to, fresh); m != nil {
+				id := to.ID
+				a.later(func() { a.deliverLink(id, m, key) })
 			}
-			return Result{201, map[string]bool{"sent": a.send(m)}, nil}
+			return Result{201, map[string]bool{"ok": true}, nil}
 		},
 		// "Email me my edit link": the same answer whether or not the email is listed.
 		"POST /api/edit-link": func(b B, s *Session) Result {
@@ -290,16 +348,13 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 				return fail(400, "email")
 			}
 			st.mu.Lock()
-			var m *mail
-			var err error
+			defer st.mu.Unlock()
 			if e := st.byEmail[email.(string)]; e != nil {
-				m, err = a.newLink(e, false)
+				if m, key := a.linkMail(e, false); m != nil {
+					id := e.ID
+					a.later(func() { a.deliverLink(id, m, key) })
+				}
 			}
-			st.mu.Unlock()
-			if err != nil {
-				return fail(500, "server")
-			}
-			a.send(m)
 			return ok(map[string]bool{"ok": true})
 		},
 		"POST /api/listing": func(b B, s *Session) Result {
@@ -331,6 +386,7 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 			// needs checking again, so it clears Verified.
 			if err := change(st, e, func(e *Engineer) {
 				e.Verified = e.Verified && e.Name == upd.Name && fmt.Sprint(deref(e.Portfolio)) == fmt.Sprint(deref(upd.Portfolio))
+				e.Pending = false // saving from the emailed link publishes the listing
 				e.Name, e.Phone, e.Headline, e.Skills, e.Rate, e.Packages, e.PayWith, e.Terms, e.Portfolio, e.About, e.Available = upd.Name, upd.Phone, upd.Headline, upd.Skills, upd.Rate, upd.Packages, upd.PayWith, upd.Terms, upd.Portfolio, upd.About, upd.Available
 			}); err != nil {
 				return fail(500, "server")
@@ -344,7 +400,7 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 			if e == nil {
 				return badLink
 			}
-			if err := st.removeEngineer(e); err != nil {
+			if err := st.removeEngineer(e, a.stamp()); err != nil {
 				return fail(500, "server")
 			}
 			return ok(map[string]bool{"ok": true})
@@ -358,8 +414,11 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 				st.mu.Lock()
 				defer st.mu.Unlock()
 				e := st.engineers[id]
-				if e == nil || e.Hidden || !e.Available {
+				if e == nil || e.Hidden || e.Pending || !e.Available {
 					return fail(404, "engineer"), nil
+				}
+				if a.requestsToday(e) >= requestsPerDay {
+					return fail(429, "engineer-busy"), nil
 				}
 				c := quoteFor(e, b["choice"], b["hours"])
 				if c == nil {
@@ -378,7 +437,9 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 				}
 				return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "email": e.Email, "phone": e.Phone, "payWith": e.PayWith, "terms": e.Terms}, "quote": c.Quote}, nil}, a.requestMail(e, j)
 			}()
-			a.send(m) // the client already has the engineer's details, so a failed email doesn't fail the request
+			if m != nil { // the client already has the engineer's details, so a held-back or failed email doesn't fail the request
+				a.later(func() { a.sendWithin(m, requestPerHour) })
+			}
 			return res
 		},
 
@@ -510,6 +571,11 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 			}
 			if err := change(st, e, func(e *Engineer) { e.Hidden = hidden }); err != nil {
 				return fail(500, "server")
+			}
+			if !hidden {
+				if err := st.unblock(e.Email); err != nil {
+					return fail(500, "server")
+				}
 			}
 			return ok(map[string]bool{"ok": true})
 		}),

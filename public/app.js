@@ -3,7 +3,7 @@ import { $, $$, h, api, tabs, usd } from './ui.js';
 // ---- Shared form helpers ----
 const MSG = {
   rate: 'Too many attempts from this connection. Try again later.', request: 'That request was refused. Reload the page and try again.',
-  pricing: 'Add an hourly rate or at least one package.', key: 'This edit link no longer works. Get a new one with "Email me my edit link" below.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
+  pricing: 'Add an hourly rate or at least one package.', 'engineer-busy': 'This engineer has had a lot of requests today. Try again tomorrow or pick another engineer.', key: 'This edit link no longer works. Get a new one with "Email me my edit link" below.', engineer: 'This engineer is no longer taking requests.', packages: 'Check each package: a title, a price of at least $25 and 1 to 90 days.', choice: 'That package is no longer offered. Reload the page.',
 };
 const labelOf = el => el?.closest('label')?.firstChild.textContent.split(/,| \(/)[0].trim().toLowerCase().replace(/^your /, '');
 const fail = (form, err) => {
@@ -127,8 +127,9 @@ const setMode = p => {
   key = p ? key : null;
   $$('[data-new]').forEach(el => (el.hidden = !!p)); $$('[data-edit]').forEach(el => (el.hidden = !p));
   $('#editing').hidden = !p; profile.elements.email.readOnly = !!p;
-  $('#profile-intro').textContent = p ? 'Your listing, as clients see it on the Find an engineer tab.' : 'List yourself with your rate and packages. No account needed.';
-  $('#profile-save').textContent = p ? 'Save changes' : 'List me';
+  $('#profile-intro').textContent = !p ? 'List yourself with your rate and packages. No account needed.' : p.pending ? "Your listing isn't published yet. Check the details and press Publish to put it live." : 'Your listing, as clients see it on the Find an engineer tab.';
+  $('#profile-save').textContent = !p ? 'List me' : p.pending ? 'Publish' : 'Save changes';
+  $('#public-page').hidden = !p || p.pending;
   if (p) $('#who').textContent = `Editing the listing for ${p.name} (${p.email}).`, Object.assign($('#public-link'), { href: `/e/${p.slug}`, textContent: `${location.origin}/e/${p.slug}` }), fill(p), drawRemove(); else clear();
 };
 const drawRemove = () => $('#remove-slot').replaceChildren(h('button', { className: 'quiet', type: 'button', textContent: 'Remove my listing', onclick: () => {
@@ -153,13 +154,13 @@ addEventListener('hashchange', openLink); // before tabs(), so a link opened on 
 onSubmit(profile, async () => {
   const body = { ...fields(profile), available: profile.elements.available.checked, packages: readPkgs() };
   if (key) {
+    const was = $('#profile-save').textContent;
     setMode(await api('/api/listing/save', { ...body, key })); await loadList();
-    return 'Saved. Clients see the change now.';
+    return was === 'Publish' ? 'Published. Your listing is live.' : 'Saved. Clients see the change now.';
   }
-  const { sent } = await api('/api/engineers', body);
-  clear(); await loadList();
-  return sent ? `You're listed. We've emailed a private link to edit or remove your listing to ${body.email}. (If that email was already listed, nothing changed and we sent its link instead.)`
-    : "Your listing is saved, but the email with your edit link couldn't be sent just now. Use \"Email me my edit link\" below in a few minutes.";
+  await api('/api/engineers', body);
+  clear();
+  return `Check your email. We've sent a private link to ${body.email}: open it, check your listing and press Publish to put it live. (If that email is already listed, we've sent its edit link instead.)`;
 });
 onSubmit(relink, async () => {
   const { email } = fields(relink);
