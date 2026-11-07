@@ -89,10 +89,10 @@ func (m *acsMailer) Send(to, subject, text string) error {
 }
 
 // editMail is the email with an engineer's private edit link.
-func editMail(name, link string, fresh bool) (string, string) {
+func editMail(name, link, page string, fresh bool) (string, string) {
 	first := "Your listing on CodeMarcer is live."
 	if !fresh {
 		first = "Here is a new link to edit your CodeMarcer listing. Older links no longer work."
 	}
-	return "Your CodeMarcer edit link", fmt.Sprintf("Hi %s,\n\n%s To change or remove it, open this private link:\n\n%s\n\nAnyone with this link can change your listing, so don't share it. To get a new one, use \"Email me my edit link\" on the For engineers tab.\n\nIf you didn't list yourself on CodeMarcer, you can ignore this email.\n", name, first, link)
+	return "Your CodeMarcer edit link", fmt.Sprintf("Hi %s,\n\n%s To change or remove it, open this private link:\n\n%s\n\nAnyone with this link can change your listing, so don't share it. To get a new one, use \"Email me my edit link\" on the For engineers tab.\n\nYour public page, to share anywhere:\n%s\n\nIf you didn't list yourself on CodeMarcer, you can ignore this email.\n", name, first, link, page)
 }

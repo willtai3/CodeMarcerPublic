@@ -9,6 +9,10 @@ Hire a software engineer to finish, fix and ship the app you built with AI.
 
 No fees, for engineers or clients. It's a straight exchange: the client pays the engineer directly and CodeMarcer takes nothing.
 
+![A client sends a request and gets the engineer's contact and payment details](docs/screenshot.png)
+
+**For engineers between jobs:** list fixed-price packages ("Deploy your app with HTTPS, $400, 3 days"), keep 100% of what you're paid, and get your own page to share (`codemarcer.com/e/your-name`). No account, no bidding, two minutes.
+
 ## Want to work on this code?
 
 This repository is public so engineers can see how the site works. It isn't a volunteer project: paid work on it, including taking it to production (hosting with HTTPS, a managed database with backups), is hired through the site. **List yourself on the site** with your rate and packages to be considered. Please don't send unsolicited pull requests.
@@ -18,8 +22,8 @@ Found a bug? Open an issue. Found a security problem? Report it privately, see [
 ## How it works
 
 - Nobody needs an account except staff.
-- Engineers list themselves with their name, email and phone, a headline, skills, an hourly rate and/or up to 5 fixed-price packages, how clients pay them (Venmo, Zelle, PayPal…) and when (upfront, half and half, on completion). The listing goes live at once, and a private link to edit or remove it is emailed to them. "Email me my edit link" sends a new one (older links stop working). Staff can hide a listing.
-- To hire, a client picks a package or hourly work and gives their name, email, phone number and a description of the project. They then see the engineer's email, phone and payment details, and the engineer's own email and phone are never shown before that.
+- Engineers list themselves with their name, email and phone, a headline, skills, an hourly rate and/or up to 5 fixed-price packages, how clients pay them (Venmo, Zelle, PayPal…) and when (upfront, half and half, on completion). The listing goes live at once, and a private link to edit or remove it is emailed to them. "Email me my edit link" sends a new one (older links stop working). Each engineer gets a public page at `/e/<name>-<id>` to share; links to it preview with their name and headline. Staff can hide a listing, and mark an engineer **Verified** after checking their portfolio (a new name or portfolio clears it).
+- To hire, a client picks a package or hourly work and gives their name, email, phone number and a description of the project. They then see the engineer's email, phone and payment details, and the engineer is emailed the request with the client's details (at most 20 request emails per engineer a day; every request is still saved for staff). The engineer's email and phone are never shown before a request.
 - The client pays the engineer directly. CodeMarcer takes no fee and never holds money.
 - Staff sign in at /admin. The owner (made with `codemarcer admin`) adds team members as **admin** (engineers, clients, hire requests) or **moderator** (hiding and showing engineers, without their contact details). Roles are checked on every request, so a change or removal applies immediately.
 

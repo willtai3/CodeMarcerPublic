@@ -44,7 +44,8 @@ type API struct {
 	mail    Mailer
 	site    string // the site's address, for edit links
 	mailMu  sync.Mutex
-	mailed  map[string]time.Time // when each address was last sent a link
+	mailed  map[string]time.Time   // when each address was last sent a link
+	asked   map[string][]time.Time // request emails sent to each engineer in the last day
 	st      *Store
 	now     func() time.Time
 	dataDir string
@@ -92,8 +93,54 @@ func (a *API) newLink(e *Engineer, fresh bool) (*mail, error) {
 	if err := change(a.st, e, func(e *Engineer) { e.EditKey = keyOf(token) }); err != nil {
 		return nil, err
 	}
-	subject, text := editMail(e.Name, a.site+"/#edit="+e.ID+"."+token, fresh)
+	subject, text := editMail(e.Name, a.site+"/#edit="+e.ID+"."+token, a.site+"/e/"+e.Slug, fresh)
 	return &mail{e.Email, subject, text}, nil
+}
+
+// askedPerDay: request emails per engineer per 24 hours. Past it, requests are still saved and shown to staff.
+const askedPerDay = 20
+
+// requestMail tells the engineer about a new request, or nil past askedPerDay. Call with st.mu held.
+func (a *API) requestMail(e *Engineer, j *Job) *mail {
+	a.mailMu.Lock()
+	defer a.mailMu.Unlock()
+	now, kept := a.now(), []time.Time{}
+	for _, t := range a.asked[e.ID] {
+		if now.Sub(t) < 24*time.Hour {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= askedPerDay {
+		a.asked[e.ID] = kept
+		return nil
+	}
+	a.asked[e.ID] = append(kept, now)
+	what := fmt.Sprintf("%s ($%d, about %d day%s)", j.Choice.Title, j.Quote, j.Choice.Days, map[bool]string{true: "s"}[j.Choice.Days != 1])
+	if j.Choice.Type == "hourly" {
+		what = fmt.Sprintf("Hourly work, about %d hour%s ($%d at $%d/hour)", j.Choice.Hours, map[bool]string{true: "s"}[j.Choice.Hours != 1], j.Quote, j.Choice.Rate)
+	}
+	link := ""
+	if j.Link != nil && *j.Link != "" {
+		link = "Link: " + *j.Link + "\n"
+	}
+	return &mail{e.Email, "New request on CodeMarcer from " + j.ClientName, fmt.Sprintf("Hi %s,\n\n%s sent you a request on CodeMarcer.\n\nWhat: %s\nName: %s\nEmail: %s\nPhone: %s\n%s\nWhat they need:\n%s\n\nThey also have your email and phone. Contact them to agree the details; CodeMarcer doesn't handle payments.\n\nTo pause or change your listing, use your private edit link, or \"Email me my edit link\" on the For engineers tab of %s.\n", e.Name, j.ClientName, what, j.ClientName, j.ClientEmail, j.ClientPhone, link, j.Details, a.site)}
+}
+
+func deref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// profilePage: the name and headline for /e/<slug>, for the page title and link previews. Call with st.mu held.
+func (a *API) profilePage(slug string) (name, headline string, found bool) {
+	for _, p := range a.directory() {
+		if p.Slug == slug {
+			return p.Name, p.Headline, true
+		}
+	}
+	return "", "", false
 }
 
 func keyOf(token string) string {
@@ -163,6 +210,8 @@ type publicProfile struct {
 	Portfolio *string   `json:"portfolio"`
 	About     *string   `json:"about"`
 	Available bool      `json:"available"`
+	Verified  bool      `json:"verified"`
+	Slug      string    `json:"slug"`
 	Created   string    `json:"created"`
 }
 
@@ -185,7 +234,7 @@ func (a *API) directory() []publicProfile {
 	list := []publicProfile{}
 	for _, e := range a.st.engineers {
 		if !e.Hidden {
-			list = append(list, publicProfile{e.ID, e.Name, e.Headline, e.Skills, e.Rate, e.Packages, e.Terms, e.Portfolio, e.About, e.Available, e.Created})
+			list = append(list, publicProfile{e.ID, e.Name, e.Headline, e.Skills, e.Rate, e.Packages, e.Terms, e.Portfolio, e.About, e.Available, e.Verified, e.Slug, e.Created})
 		}
 	}
 	sort.SliceStable(list, func(i, j int) bool {
@@ -201,7 +250,7 @@ func (a *API) directory() []publicProfile {
 var hireSpec = []check{{"clientName", strOf(1, 80, false)}, {"clientEmail", emailOf}, {"clientPhone", phoneOf}, {"details", strOf(10, 2000, true)}, {"link", opt(linkOf)}}
 
 func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
-	a := &API{mail: m, site: strings.TrimRight(site, "/"), mailed: map[string]time.Time{}, st: st, now: time.Now, dataDir: dataDir}
+	a := &API{mail: m, site: strings.TrimRight(site, "/"), mailed: map[string]time.Time{}, asked: map[string][]time.Time{}, st: st, now: time.Now, dataDir: dataDir}
 	a.routes = map[string]handler{
 		"GET /api/engineers": func(b B, s *Session) Result {
 			st.mu.RLock()
@@ -220,6 +269,7 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 			to, fresh := st.byEmail[e.Email], false
 			if to == nil {
 				e.ID, e.Kind, e.Created = newID(), "engineer", a.stamp()
+				e.Slug = st.slugFor(e.Name, e.ID)
 				if err := st.addEngineer(e); err != nil {
 					st.mu.Unlock()
 					return fail(500, "server")
@@ -277,8 +327,10 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 			if e == nil {
 				return badLink
 			}
-			// The email, the hidden flag and the id can't be set from here.
+			// The email, the hidden flag, the id and the public address can't be set from here. A new name or portfolio
+			// needs checking again, so it clears Verified.
 			if err := change(st, e, func(e *Engineer) {
+				e.Verified = e.Verified && e.Name == upd.Name && fmt.Sprint(deref(e.Portfolio)) == fmt.Sprint(deref(upd.Portfolio))
 				e.Name, e.Phone, e.Headline, e.Skills, e.Rate, e.Packages, e.PayWith, e.Terms, e.Portfolio, e.About, e.Available = upd.Name, upd.Phone, upd.Headline, upd.Skills, upd.Rate, upd.Packages, upd.PayWith, upd.Terms, upd.Portfolio, upd.About, upd.Available
 			}); err != nil {
 				return fail(500, "server")
@@ -302,28 +354,32 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 		// engineer's email, phone and payment details and contacts them directly.
 		"POST /api/jobs": func(b B, s *Session) Result {
 			id, _ := b["engineerId"].(string)
-			st.mu.Lock()
-			defer st.mu.Unlock()
-			e := st.engineers[id]
-			if e == nil || e.Hidden || !e.Available {
-				return fail(404, "engineer")
-			}
-			c := quoteFor(e, b["choice"], b["hours"])
-			if c == nil {
-				if b["choice"] == "hourly" {
-					return fail(400, "hours")
+			res, m := func() (Result, *mail) {
+				st.mu.Lock()
+				defer st.mu.Unlock()
+				e := st.engineers[id]
+				if e == nil || e.Hidden || !e.Available {
+					return fail(404, "engineer"), nil
 				}
-				return fail(400, "choice")
-			}
-			d, bad := validate(hireSpec, b)
-			if bad != "" {
-				return fail(400, bad)
-			}
-			j := &Job{ID: newID(), Kind: "job", Created: a.stamp(), EngineerID: e.ID, ClientName: d["clientName"].(string), ClientEmail: d["clientEmail"].(string), ClientPhone: d["clientPhone"].(string), Details: d["details"].(string), Link: strPtr(d["link"]), Choice: *c, Quote: c.Quote}
-			if err := st.addJob(j); err != nil {
-				return fail(500, "server")
-			}
-			return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "email": e.Email, "phone": e.Phone, "payWith": e.PayWith, "terms": e.Terms}, "quote": c.Quote}, nil}
+				c := quoteFor(e, b["choice"], b["hours"])
+				if c == nil {
+					if b["choice"] == "hourly" {
+						return fail(400, "hours"), nil
+					}
+					return fail(400, "choice"), nil
+				}
+				d, bad := validate(hireSpec, b)
+				if bad != "" {
+					return fail(400, bad), nil
+				}
+				j := &Job{ID: newID(), Kind: "job", Created: a.stamp(), EngineerID: e.ID, ClientName: d["clientName"].(string), ClientEmail: d["clientEmail"].(string), ClientPhone: d["clientPhone"].(string), Details: d["details"].(string), Link: strPtr(d["link"]), Choice: *c, Quote: c.Quote}
+				if err := st.addJob(j); err != nil {
+					return fail(500, "server"), nil
+				}
+				return Result{201, map[string]any{"engineer": map[string]string{"name": e.Name, "email": e.Email, "phone": e.Phone, "payWith": e.PayWith, "terms": e.Terms}, "quote": c.Quote}, nil}, a.requestMail(e, j)
+			}()
+			a.send(m) // the client already has the engineer's details, so a failed email doesn't fail the request
+			return res
 		},
 
 		"POST /api/admin/login": func(b B, s *Session) Result {
@@ -453,6 +509,21 @@ func NewAPI(st *Store, dataDir string, m Mailer, site string) *API {
 				return fail(400, "hidden")
 			}
 			if err := change(st, e, func(e *Engineer) { e.Hidden = hidden }); err != nil {
+				return fail(500, "server")
+			}
+			return ok(map[string]bool{"ok": true})
+		}),
+		"POST /api/admin/verify": a.staffOnly("moderate", func(b B, s *Session) Result {
+			id, _ := b["id"].(string)
+			verified, isBool := b["verified"].(bool)
+			e := st.engineers[id]
+			if e == nil {
+				return gone
+			}
+			if !isBool {
+				return fail(400, "verified")
+			}
+			if err := change(st, e, func(e *Engineer) { e.Verified = verified }); err != nil {
 				return fail(500, "server")
 			}
 			return ok(map[string]bool{"ok": true})

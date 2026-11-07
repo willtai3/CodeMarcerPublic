@@ -116,3 +116,7 @@ details p { margin: 6px 0; max-width: 46ch; }
 .danger { background: #e5251c; border-color: #e5251c; color: #fff; }
 .board .more { list-style: none; }
 input[readonly] { color: var(--mute); background: transparent; border-style: dashed; }
+.card a.name { color: inherit; font-weight: 700; text-decoration: none; }
+.card a.name:hover, .card a.name:focus-visible { text-decoration: underline; }
+.verified { margin-left: 8px; padding: 1px 8px; border: 1px solid var(--ok); border-radius: 999px; color: var(--ok); font-size: 12px; vertical-align: 1px; }
+#public-page { margin: 0 0 16px; overflow-wrap: anywhere; }
