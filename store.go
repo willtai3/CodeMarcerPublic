@@ -43,9 +43,18 @@ type Engineer struct {
 	About     *string   `json:"about"`
 	Available bool      `json:"available"`
 	Hidden    bool      `json:"hidden"`
-	Slug      string    `json:"slug"`              // the public page: /e/<slug>; kept when the name changes so shared links keep working
-	Verified  bool      `json:"verified"`          // staff checked their portfolio; cleared when the portfolio or name changes
-	EditKey   string    `json:"editKey,omitempty"` // SHA-256 of the private edit link's secret; a new link replaces it
+	Pending   bool      `json:"pending,omitempty"`  // listed but not yet published from the emailed link, so not shown
+	LinkSent  string    `json:"linkSent,omitempty"` // when the current edit link was emailed; links expire after linkLife
+	Slug      string    `json:"slug"`               // the public page: /e/<slug>; kept when the name changes so shared links keep working
+	Verified  bool      `json:"verified"`           // staff checked their portfolio; cleared when the portfolio or name changes
+	EditKey   string    `json:"editKey,omitempty"`  // SHA-256 of the private edit link's secret; a new link replaces it
+}
+
+// Block: an email whose listing was hidden by staff and then removed by its owner. Listing it again starts hidden.
+type Block struct {
+	Kind    string `json:"kind"`
+	Email   string `json:"email"`
+	Created string `json:"created"`
 }
 
 type Staff struct {
@@ -92,6 +101,7 @@ type Store struct {
 	version   int
 	engineers map[string]*Engineer
 	byEmail   map[string]*Engineer
+	blocked   map[string]*Block // emails whose hidden listing was removed
 	staff     map[string]*Staff
 	jobs      map[string]*Job
 	write     func(path string, data []byte) error // replaced in tests to simulate a full disk
@@ -101,7 +111,7 @@ func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	s := &Store{file: filepath.Join(dir, "store.json"), engineers: map[string]*Engineer{}, byEmail: map[string]*Engineer{}, staff: map[string]*Staff{}, jobs: map[string]*Job{}, write: atomicWrite}
+	s := &Store{file: filepath.Join(dir, "store.json"), engineers: map[string]*Engineer{}, byEmail: map[string]*Engineer{}, blocked: map[string]*Block{}, staff: map[string]*Staff{}, jobs: map[string]*Job{}, write: atomicWrite}
 	data, err := os.ReadFile(s.file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -127,6 +137,12 @@ func OpenStore(dir string) (*Store, error) {
 			if e.Slug == "" {
 				e.Slug = s.slugFor(e.Name, e.ID)
 			}
+		case "block":
+			k := &Block{}
+			if err := json.Unmarshal(r, k); err != nil {
+				return nil, err
+			}
+			s.blocked[k.Email] = k
 		case "staff":
 			x := &Staff{}
 			if err := json.Unmarshal(r, x); err != nil {
@@ -185,6 +201,9 @@ func (s *Store) commit(undo func()) error {
 	for _, j := range s.jobs {
 		all, ids[j] = append(all, j), j.Created+j.ID
 	}
+	for _, k := range s.blocked {
+		all, ids[k] = append(all, k), k.Created+k.Email
+	}
 	sort.Slice(all, func(a, b int) bool { return ids[all[a]] < ids[all[b]] })
 	data, err := json.Marshal(all)
 	if err == nil {
@@ -231,11 +250,33 @@ func (s *Store) slugFor(name, id string) string {
 	}
 }
 
-// removeEngineer deletes a listing; their past requests stay in the ledger under "(removed)".
-func (s *Store) removeEngineer(e *Engineer) error {
+// removeEngineer deletes a listing; their past requests stay in the ledger under "(removed)". A listing staff had
+// hidden leaves a block, so listing the same email again doesn't undo the moderation.
+func (s *Store) removeEngineer(e *Engineer, stamp string) error {
 	delete(s.engineers, e.ID)
 	delete(s.byEmail, e.Email)
-	return s.commit(func() { s.engineers[e.ID], s.byEmail[e.Email] = e, e })
+	old := s.blocked[e.Email]
+	if e.Hidden {
+		s.blocked[e.Email] = &Block{Kind: "block", Email: e.Email, Created: stamp}
+	}
+	return s.commit(func() {
+		s.engineers[e.ID], s.byEmail[e.Email] = e, e
+		if old == nil {
+			delete(s.blocked, e.Email)
+		} else {
+			s.blocked[e.Email] = old
+		}
+	})
+}
+
+// unblock: staff showed this email's listing again.
+func (s *Store) unblock(email string) error {
+	k := s.blocked[email]
+	if k == nil {
+		return nil
+	}
+	delete(s.blocked, email)
+	return s.commit(func() { s.blocked[email] = k })
 }
 
 func (s *Store) addStaff(x *Staff) error {

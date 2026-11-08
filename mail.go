@@ -88,11 +88,12 @@ func (m *acsMailer) Send(to, subject, text string) error {
 	return nil
 }
 
-// editMail is the email with an engineer's private edit link.
-func editMail(name, link, page string, fresh bool) (string, string) {
-	first := "Your listing on CodeMarcer is live."
-	if !fresh {
-		first = "Here is a new link to edit your CodeMarcer listing. Older links no longer work."
+// editMail is the email with an engineer's private edit link. It carries no text anyone else wrote, since anyone can
+// make the site send it to any address.
+func editMail(link, page string, publish bool) (string, string) {
+	subject, first := "Your CodeMarcer edit link", "Here is a new private link to edit or remove your CodeMarcer listing. Older links stop working."
+	if publish {
+		subject, first = "Publish your CodeMarcer listing", "Someone listed this email address on CodeMarcer. If it was you, open this private link, check the details and press Publish. Nothing is shown until you do."
 	}
-	return "Your CodeMarcer edit link", fmt.Sprintf("Hi %s,\n\n%s To change or remove it, open this private link:\n\n%s\n\nAnyone with this link can change your listing, so don't share it. To get a new one, use \"Email me my edit link\" on the For engineers tab.\n\nYour public page, to share anywhere:\n%s\n\nIf you didn't list yourself on CodeMarcer, you can ignore this email.\n", name, first, link, page)
+	return subject, fmt.Sprintf("%s\n\n%s\n\nAnyone with this link can change the listing, so don't share it. It works for 30 days; \"Email me my edit link\" on the For engineers tab sends a new one.\n\nOnce published, your public page is:\n%s\n\nIf you didn't list yourself on CodeMarcer, ignore this email and nothing is published.\n", first, link, page)
 }

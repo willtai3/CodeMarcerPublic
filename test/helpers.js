@@ -48,3 +48,13 @@ export const keyFor = async (srv, email) => (await settled(srv), mails(srv)).fil
 export const mailsTo = async (srv, email, kind = 'edit link') => (await settled(srv), mails(srv)).filter(([to, m]) => to === email && m.includes(kind === 'edit link' ? '#edit=' : 'sent you a request')).length;
 
 export const ENGINEER = { name: 'Maya R.', email: 'maya@example.com', phone: '(555) 010-2030', headline: 'I take AI-built web apps to production', skills: 'Next, Supabase, Stripe, React', rate: '120', packages: [{ title: 'Deploy your app with HTTPS', price: '400', days: '5', details: 'Hosting, domain and HTTPS' }], payWith: 'Venmo @maya-r', terms: 'Half upfront, half on completion', portfolio: 'https://github.com/maya', about: '', available: true };
+
+// publish lists an engineer through the form, then publishes the listing from the emailed link. Returns the edit key.
+export const publish = async (srv, body) => {
+  const r = await post(srv.base, '/api/engineers', body);
+  if (r.status !== 201) throw new Error(`listing answered ${r.status}`);
+  const key = await keyFor(srv, body.email);
+  const p = await post(srv.base, '/api/listing/save', { ...body, key });
+  if (p.status !== 200) throw new Error(`publishing answered ${p.status}`);
+  return key;
+};

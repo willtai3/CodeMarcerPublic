@@ -2,7 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { mkdir } from 'node:fs/promises';
-import { start, post, keyFor, ADMIN, ENGINEER } from './helpers.js';
+import { start, keyFor, publish, ADMIN, ENGINEER } from './helpers.js';
 
 const { chromium } = createRequire(import.meta.url)('playwright');
 const SHOTS = process.env.SHOTS; // folder for screenshots, optional
@@ -64,10 +64,18 @@ test('engineer lists themselves with email and phone, no password: pricing requi
   await shot(page, 'desktop-signup');
 
   await f.getByRole('button', { name: 'List me' }).click(); // empty extra rows are dropped
-  await f.getByText(/^You're listed\. We've emailed a private link to edit or remove your listing to maya@example\.com\./).waitFor();
+  await f.getByText(/^Check your email\. We've sent a private link to maya@example\.com: open it, check your listing and press Publish/).waitFor();
   assert.equal(await f.locator('[name="name"]').inputValue(), '', 'the form is cleared for the next person');
-  assert.ok((await keyFor(srv, 'maya@example.com')), 'the edit link was emailed');
+  await page.getByRole('tab', { name: 'Find an engineer' }).click();
+  await page.getByText('No engineers listed yet.').waitFor(); // Hardening: nothing shows until the email owner publishes
 
+  // Opening the emailed link: the listing waits for Publish.
+  await page.goto(srv.base + '/#edit=' + (await keyFor(srv, 'maya@example.com')));
+  await page.getByText("Your listing isn't published yet. Check the details and press Publish to put it live.").waitFor();
+  assert.equal(await page.locator('#public-page').isHidden(), true);
+  await f.getByRole('button', { name: 'Publish' }).click();
+  await f.getByText('Published. Your listing is live.').waitFor();
+  await f.getByRole('button', { name: 'Save changes' }).waitFor();
   await page.getByRole('tab', { name: 'Find an engineer' }).click();
   await page.locator('.card', { hasText: 'Maya R.' }).waitFor();
   await done(/status of 400/); // the deliberate validation failures
@@ -156,7 +164,7 @@ test('edit link: opens the listing, leaves the address bar, saves, emails a new 
   await relink.getByText('This edit link no longer works. Get a new one with "Email me my edit link" below.').waitFor();
   await f.getByRole('button', { name: 'List me' }).waitFor();
 
-  await post(srv.base, '/api/engineers', { ...ENGINEER, name: 'Dev', email: 'dev@example.com' });
+  await publish(srv, { ...ENGINEER, name: 'Dev', email: 'dev@example.com' });
   await page.goto(srv.base + '/#edit=' + (await keyFor(srv, 'dev@example.com'))); // a link opened while the page is open
   await page.getByText('Editing the listing for Dev (dev@example.com).').waitFor();
   await page.getByRole('button', { name: 'Remove my listing' }).click();

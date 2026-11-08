@@ -2,7 +2,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { start, post, login, setupOwner, ADMIN, ENGINEER, cookieOf, keyFor, mailsTo } from './helpers.js';
+import { start, post, login, setupOwner, ADMIN, ENGINEER, cookieOf, keyFor, mailsTo, publish } from './helpers.js';
 
 let srv, base;
 before(async () => { srv = await start(); base = srv.base; });
@@ -67,11 +67,14 @@ test('requests: JSON only, size cap, bad JSON, other sites refused', async () =>
 });
 
 let maya, mayaKey;
-test('engineer lists with email and phone, no password; live at once; edit link emailed; public profile hides private fields', async () => {
+test('engineer lists with email and phone, no password; published from the emailed link; public profile hides private fields', async () => {
   const r = await post(base, '/api/engineers', ENGINEER);
-  assert.deepEqual([r.status, await json(r), r.headers.get('set-cookie')], [201, { sent: true }, null], 'no account, no session');
+  assert.deepEqual([r.status, await json(r), r.headers.get('set-cookie')], [201, { ok: true }, null], 'no account, no session');
   mayaKey = (await keyFor(srv, 'maya@example.com'));
   assert.ok(mayaKey, 'edit link emailed');
+  assert.deepEqual(await json(await get('/api/engineers')), [], 'Hardening: nothing is shown until the email owner publishes it');
+  assert.equal((await json(await post(base, '/api/listing', { key: mayaKey }))).pending, true);
+  assert.equal((await post(base, '/api/listing/save', { ...ENGINEER, key: mayaKey })).status, 200);
   maya = (await json(await get('/api/engineers'))).find(e => e.name === 'Maya R.');
   assert.deepEqual(Object.keys(maya).sort(), ['about', 'available', 'created', 'headline', 'id', 'name', 'packages', 'portfolio', 'rate', 'skills', 'slug', 'terms', 'verified']);
   assert.match(maya.slug, /^maya-r-[0-9a-f]{4,}$/);
@@ -84,11 +87,13 @@ test('engineer lists with email and phone, no password; live at once; edit link 
     assert.deepEqual(await json(await post(base, '/api/engineers', { ...ENGINEER, email: 'x@example.com', ...patch })), { error: field }, JSON.stringify(patch));
   // The same email again (any case): same answer, no second listing, nothing changed; a new link goes to the owner.
   const again = await post(base, '/api/engineers', { ...ENGINEER, email: 'MAYA@example.com', name: 'Impostor' });
-  assert.deepEqual([again.status, await json(again)], [201, { sent: true }]);
+  assert.deepEqual([again.status, await json(again)], [201, { ok: true }]);
   assert.deepEqual((await json(await get('/api/engineers'))).map(e => e.name), ['Maya R.']);
   assert.equal((await mailsTo(srv, 'maya@example.com')), 1, 'at most one link per 10 minutes');
   // Two listings with the same new email at the same moment: exactly one is made.
   await Promise.all([1, 2].map(() => post(base, '/api/engineers', { ...ENGINEER, name: 'Quokka Twin', email: 'twin@example.com' })));
+  assert.equal(await mailsTo(srv, 'twin@example.com'), 1, 'one listing, one email');
+  await post(base, '/api/listing/save', { ...ENGINEER, name: 'Quokka Twin', key: await keyFor(srv, 'twin@example.com') });
   assert.equal((await json(await get('/api/engineers'))).filter(e => e.name === 'Quokka Twin').length, 1);
 });
 
@@ -110,8 +115,7 @@ test('edit link: opens, saves and removes the listing; the email stays fixed; a 
   assert.equal((await keyFor(srv, 'maya@example.com')), mayaKey, 'within 10 minutes of the last link, nothing is sent and the link still works');
 
   const dev = { ...ENGINEER, name: 'Dev', email: 'dev@example.com' };
-  await post(base, '/api/engineers', dev);
-  const devKey = (await keyFor(srv, 'dev@example.com'));
+  const devKey = await publish(srv, dev);
   assert.equal((await post(base, '/api/listing/remove', { key: devKey.split('.')[0] + '.' + mayaKey.split('.')[1] })).status, 401, "Maya's secret doesn't open Dev's listing");
   assert.deepEqual(await json(await post(base, '/api/listing/remove', { key: devKey })), { ok: true });
   assert.ok(!(await json(await get('/api/engineers'))).some(e => e.name === 'Dev'));
@@ -236,7 +240,7 @@ test('behind the proxy, rate limits use the address the proxy added, not one the
 test('rate limits hold under a burst: 30 hire requests at once, 10 accepted', async () => {
   const s = await start();
   try {
-    await post(s.base, '/api/engineers', ENGINEER);
+    await publish(s, ENGINEER);
     const e = (await (await fetch(s.base + '/api/engineers')).json())[0];
     const burst = await Promise.all(Array.from({ length: 30 }, () => post(s.base, '/api/jobs', { engineerId: e.id, choice: 'p0', details: 'Login breaks after deploy.', ...CLIENT })));
     const codes = burst.map(r => r.status);

@@ -285,7 +285,11 @@ func TestConcurrentRequestsDontRace(t *testing.T) {
 	if w := do("POST", "/api/engineers", `{"email":"a@b.co",`+listing+`}`); w.Code != 201 {
 		t.Fatalf("listing %d", w.Code)
 	}
+	sv.api.work.Wait()
 	key := mm.key(t, 0)
+	if w := do("POST", "/api/listing/save", `{"key":"`+key+`",`+listing+`}`); w.Code != 200 {
+		t.Fatalf("publish %d", w.Code)
+	}
 	var id string
 	for k := range st.engineers {
 		id = k
@@ -323,6 +327,19 @@ func (m *memMail) Send(to, subject, text string) error {
 
 var editRe = regexp.MustCompile(`#edit=([0-9a-f-]+\.[A-Za-z0-9_-]{43})`)
 
+// keyFor returns the edit key from the latest link email sent to an address.
+func (m *memMail) keyFor(t *testing.T, to string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.sent) - 1; i >= 0; i-- {
+		if k := editRe.FindStringSubmatch(m.sent[i].text); k != nil && m.sent[i].to == to {
+			return k[1]
+		}
+	}
+	t.Fatalf("no edit link sent to %s", to)
+	return ""
+}
+
 // key returns the edit key from the i-th email sent.
 func (m *memMail) key(t *testing.T, i int) string {
 	m.mu.Lock()
@@ -337,6 +354,20 @@ func (m *memMail) key(t *testing.T, i int) string {
 	return k[1]
 }
 
+// list makes a listing through the form, then publishes it from the emailed link, as an engineer would.
+func list(t *testing.T, a *API, b B) *Engineer {
+	t.Helper()
+	if r := a.routes["POST /api/engineers"](b, nil); r.Status != 201 {
+		t.Fatalf("listing: %d %v", r.Status, r.Body)
+	}
+	a.work.Wait()
+	email, _ := b["email"].(string)
+	if r := a.routes["POST /api/listing/save"](with(b, "key", a.mail.(*memMail).keyFor(t, email)), nil); r.Status != 200 {
+		t.Fatalf("publish: %d %v", r.Status, r.Body)
+	}
+	return a.st.byEmail[email]
+}
+
 // No sign-in for engineers: a listing is managed with a private link sent to its email.
 func TestEditLinks(t *testing.T) {
 	st, _ := OpenStore(t.TempDir())
@@ -344,18 +375,15 @@ func TestEditLinks(t *testing.T) {
 	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test/")
 	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	a.now = func() time.Time { return clock }
-	call := func(route string, b B) Result { return a.routes[route](b, nil) }
-	if r := call("POST /api/engineers", engineerBody()); r.Status != 201 || r.Change != nil {
-		t.Fatalf("listing: %d %v", r.Status, r.Change)
+	call := func(route string, b B) Result { r := a.routes[route](b, nil); a.work.Wait(); return r }
+	if r := call("POST /api/engineers", engineerBody()); r.Status != 201 || r.Change != nil || !reflect.DeepEqual(r.Body, map[string]bool{"ok": true}) {
+		t.Fatalf("listing: %d %v %v", r.Status, r.Body, r.Change)
 	}
 	if len(mm.sent) != 1 || mm.sent[0].to != "maya@example.com" || !strings.Contains(mm.sent[0].text, "https://codemarcer.test/#edit=") {
 		t.Fatalf("email: %+v", mm.sent)
 	}
 	key := mm.key(t, 0)
-	var e *Engineer
-	for _, x := range st.engineers {
-		e = x
-	}
+	e := st.byEmail["maya@example.com"]
 	if e.EditKey == "" || strings.Contains(e.EditKey, strings.Split(key, ".")[1]) {
 		t.Error("the link's secret is stored instead of its hash")
 	}
@@ -370,10 +398,10 @@ func TestEditLinks(t *testing.T) {
 	if r := call("POST /api/listing/save", with(B{"key": "nope"}, "name", "")); r.Status != 401 {
 		t.Errorf("save with a wrong link and a bad body: %d, want 401 before validation", r.Status)
 	}
-	if r := call("POST /api/listing/save", with(with(engineerBody(), "key", key), "email", "thief@example.com")); r.Status != 200 || e.Email != "maya@example.com" {
-		t.Errorf("save: %d, email now %q", r.Status, e.Email)
+	if r := call("POST /api/listing/save", with(with(engineerBody(), "key", key), "email", "thief@example.com")); r.Status != 200 || e.Email != "maya@example.com" || e.Pending {
+		t.Errorf("save: %d, email now %q, pending %v", r.Status, e.Email, e.Pending)
 	}
-	// Listing the same email again doesn't make a second listing or say it exists; it sends a new link.
+	// A published email listed again: no second listing, nothing changed, a new link (after the gap).
 	clock = clock.Add(11 * time.Minute)
 	if r := call("POST /api/engineers", with(engineerBody(), "name", "Someone Else")); r.Status != 201 || len(st.engineers) != 1 || e.Name != "Maya R." || len(mm.sent) != 2 {
 		t.Fatalf("listing a taken email: %d, %d listings, name %q, %d emails", r.Status, len(st.engineers), e.Name, len(mm.sent))
@@ -400,15 +428,188 @@ func TestEditLinks(t *testing.T) {
 	}
 }
 
+// Hardening (F1): a listing stays unseen until it is published from the emailed link, so nobody can list someone
+// else's email with their own phone and payment details. Until then the latest details sent for that email win.
+func TestListingWaitsForTheEmailedLink(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(dir)
+	mm := &memMail{}
+	sv := &server{api: NewAPI(st, dir, mm, "https://codemarcer.test"), static: map[string][]byte{"/": must(publicFS.ReadFile("public/index.html"))}, hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
+	a := sv.api
+	fake := with(with(with(engineerBody(), "name", "Famous Dev"), "phone", "555 999 0000"), "payWith", "Venmo @attacker")
+	a.routes["POST /api/engineers"](fake, nil)
+	a.work.Wait()
+	e := st.byEmail["maya@example.com"]
+	hire := B{"engineerId": e.ID, "choice": "p0", "clientName": "Ann", "clientEmail": "ann@example.com", "clientPhone": "5551234567", "details": "Login breaks after deploy."}
+	w := httptest.NewRecorder()
+	sv.ServeHTTP(w, httptest.NewRequest("GET", "/e/"+e.Slug, nil))
+	if len(a.directory()) != 0 || a.routes["POST /api/jobs"](hire, nil).Status != 404 || w.Code != 404 {
+		t.Fatal("an unpublished listing is visible or hireable")
+	}
+	if !strings.Contains(mm.sent[0].text, "press Publish") || mm.sent[0].subject != "Publish your CodeMarcer listing" {
+		t.Errorf("email: %s\n%s", mm.sent[0].subject, mm.sent[0].text)
+	}
+	// The real owner lists the same email: their details replace the fake ones, and the link they get shows those.
+	a.routes["POST /api/engineers"](engineerBody(), nil)
+	a.work.Wait()
+	if e.Name != "Maya R." || e.PayWith != "Venmo @maya" || len(st.engineers) != 1 {
+		t.Fatalf("pending details: %q %q, %d listings", e.Name, e.PayWith, len(st.engineers))
+	}
+	if r := a.routes["POST /api/listing"](B{"key": mm.key(t, 0)}, nil); r.Status != 200 || !r.Body.(Engineer).Pending {
+		t.Fatalf("open: %d %+v", r.Status, r.Body)
+	}
+	a.routes["POST /api/listing/save"](with(engineerBody(), "key", mm.key(t, 0)), nil)
+	if e.Pending || len(a.directory()) != 1 || a.routes["POST /api/jobs"](hire, nil).Status != 201 {
+		t.Fatal("publishing from the link didn't put the listing live")
+	}
+	// Once published, the form can't change it.
+	a.routes["POST /api/engineers"](fake, nil)
+	a.work.Wait()
+	if e.PayWith != "Venmo @maya" {
+		t.Error("a published listing was overwritten from the form")
+	}
+}
+
+// Hardening (F2, F4, F7): the reply comes before any email is sent; a link is stored only once its email has gone,
+// so a failed email leaves the old link working and the address free to ask again; the 10-minute gap survives a restart.
+func TestLinkStoredOnlyAfterItsEmailIsSent(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(dir)
+	mm := &memMail{}
+	a := NewAPI(st, dir, mm, "https://codemarcer.test")
+	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	e := list(t, a, engineerBody())
+	key := mm.keyFor(t, "maya@example.com")
+	clock = clock.Add(11 * time.Minute)
+	a.mail = failMail{}
+	a.routes["POST /api/edit-link"](B{"email": "maya@example.com"}, nil)
+	a.work.Wait()
+	if a.routes["POST /api/listing"](B{"key": key}, nil).Status != 200 {
+		t.Error("a failed email broke the link that still works")
+	}
+	a.mail = mm
+	clock = clock.Add(time.Minute)
+	a.routes["POST /api/edit-link"](B{"email": "maya@example.com"}, nil)
+	a.work.Wait()
+	if mm.keyFor(t, "maya@example.com") == key {
+		t.Fatal("the retry after a failed email was held back by the 10-minute gap")
+	}
+	// Reply first: with the email service stuck, the answer still comes at once.
+	block := make(chan struct{})
+	a.mail = slowMail{block}
+	clock = clock.Add(11 * time.Minute)
+	done := make(chan Result, 1)
+	go func() { done <- a.routes["POST /api/edit-link"](B{"email": "maya@example.com"}, nil) }()
+	select {
+	case r := <-done:
+		if r.Status != 200 {
+			t.Errorf("%d", r.Status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the reply waited for the email to be sent")
+	}
+	close(block)
+	a.work.Wait()
+	// The gap is kept on the listing, so it holds after a restart.
+	st2, _ := OpenStore(dir)
+	a2 := NewAPI(st2, dir, &memMail{}, "https://codemarcer.test")
+	a2.now = func() time.Time { return clock.Add(time.Minute) }
+	a2.routes["POST /api/edit-link"](B{"email": "maya@example.com"}, nil)
+	a2.work.Wait()
+	if n := len(a2.mail.(*memMail).sent); n != 0 || st2.byEmail[e.Email].LinkSent == "" {
+		t.Errorf("after a restart, %d emails sent within the gap", n)
+	}
+}
+
+type slowMail struct{ wait chan struct{} }
+
+func (m slowMail) Send(to, subject, text string) error { <-m.wait; return nil }
+
+// Hardening (F3): the site keeps under the email service's hourly limit and holds request emails back first, so edit
+// links still go out; link emails carry no text anyone else wrote.
+func TestEmailBudget(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	mm := &memMail{}
+	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test")
+	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	a.routes["POST /api/engineers"](with(with(engineerBody(), "name", "PayPal locked, call 555 0100"), "headline", "Call 555 0100 now"), nil)
+	a.work.Wait()
+	if strings.Contains(mm.sent[0].text, "PayPal") || strings.Contains(mm.sent[0].text, "555 0100") {
+		t.Errorf("link email carries the form's text:\n%s", mm.sent[0].text)
+	}
+	m := &mail{"x@example.com", "s", "t"}
+	for i := 0; i < 200; i++ {
+		clock = clock.Add(3 * time.Second) // 20 a minute, under the per-minute limit
+		a.sendWithin(m, map[bool]int{true: requestPerHour, false: mailPerHour}[i%2 == 0])
+	}
+	if n := len(mm.sent); n != mailPerHour {
+		t.Errorf("%d emails in an hour, want %d", n, mailPerHour)
+	}
+	if a.sendWithin(m, requestPerHour) {
+		t.Error("a request email was sent past its share of the hourly limit")
+	}
+	clock = clock.Add(time.Hour)
+	for i := 0; i < 40; i++ {
+		a.sendWithin(m, mailPerHour)
+	}
+	if n := len(mm.sent) - mailPerHour; n != mailPerMinute {
+		t.Errorf("%d emails in one minute, want %d", n, mailPerMinute)
+	}
+}
+
+// Hardening (F5): removing a listing that staff hid, then listing the email again, doesn't undo the hiding.
+func TestHiddenListingCantBeRelisted(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenStore(dir)
+	mm := &memMail{}
+	a := NewAPI(st, dir, mm, "https://codemarcer.test")
+	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	e := list(t, a, engineerBody())
+	change(st, e, func(e *Engineer) { e.Hidden = true })
+	a.routes["POST /api/listing/remove"](B{"key": mm.keyFor(t, "maya@example.com")}, nil)
+	st, _ = OpenStore(dir) // the block is saved
+	a = NewAPI(st, dir, mm, "https://codemarcer.test")
+	a.now = func() time.Time { return clock }
+	e = list(t, a, engineerBody())
+	if !e.Hidden || len(a.directory()) != 0 {
+		t.Fatal("re-listing undid the hiding")
+	}
+	owner := &Session{Role: "owner", Ver: "v"}
+	setOwner(dir, "me@example.com", "long enough password")
+	owner.Ver = ownerVersion(dir)
+	a.routes["POST /api/admin/hide"](B{"id": e.ID, "hidden": false}, owner)
+	if len(a.directory()) != 1 || st.blocked["maya@example.com"] != nil {
+		t.Error("staff showing the listing didn't clear the block")
+	}
+}
+
+// Hardening (F11): an edit link stops working after 30 days.
+func TestEditLinksExpire(t *testing.T) {
+	st, _ := OpenStore(t.TempDir())
+	mm := &memMail{}
+	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test")
+	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return clock }
+	list(t, a, engineerBody())
+	key := mm.keyFor(t, "maya@example.com")
+	clock = clock.Add(29 * 24 * time.Hour)
+	if a.routes["POST /api/listing"](B{"key": key}, nil).Status != 200 {
+		t.Error("expired too early")
+	}
+	clock = clock.Add(2 * 24 * time.Hour)
+	if a.routes["POST /api/listing"](B{"key": key}, nil).Status != 401 {
+		t.Error("a 31-day-old link still works")
+	}
+}
+
 // The hire reply hands the client the engineer's contact and payment details.
 func TestHireShowsContact(t *testing.T) {
 	st, _ := OpenStore(t.TempDir())
 	a := NewAPI(st, t.TempDir(), &memMail{}, "https://codemarcer.test")
-	a.routes["POST /api/engineers"](engineerBody(), nil)
-	var id string
-	for k := range st.engineers {
-		id = k
-	}
+	id := list(t, a, engineerBody()).ID
 	r := a.routes["POST /api/jobs"](B{"engineerId": id, "choice": "p0", "clientName": "Ann", "clientEmail": "ann@example.com", "clientPhone": "5551234567", "details": "Login breaks after deploy."}, nil)
 	want := map[string]string{"name": "Maya R.", "email": "maya@example.com", "phone": "(555) 123-4567", "payWith": "Venmo @maya", "terms": "Upfront"}
 	if r.Status != 201 || !reflect.DeepEqual(r.Body.(map[string]any)["engineer"], want) {
@@ -536,8 +737,7 @@ func TestSlugs(t *testing.T) {
 	}
 	a := NewAPI(st, t.TempDir(), &memMail{}, "https://codemarcer.test")
 	mm := a.mail.(*memMail)
-	a.routes["POST /api/engineers"](with(engineerBody(), "email", "new@example.com"), nil)
-	e := st.byEmail["new@example.com"]
+	e := list(t, a, with(engineerBody(), "email", "new@example.com"))
 	if !strings.HasPrefix(e.Slug, "maya-r-") || !strings.Contains(mm.sent[0].text, "https://codemarcer.test/e/"+e.Slug+"\n") {
 		t.Fatalf("slug %q; email %q", e.Slug, mm.sent[0].text)
 	}
@@ -558,8 +758,7 @@ func TestProfilePage(t *testing.T) {
 	sv := &server{api: NewAPI(st, dir, &memMail{}, "https://codemarcer.test"), static: map[string][]byte{}, hits: map[string][]time.Time{}, sessions: map[string]*Session{}}
 	home, _ := publicFS.ReadFile("public/index.html")
 	sv.static["/"] = home
-	sv.api.routes["POST /api/engineers"](with(with(engineerBody(), "name", `Eve <script>alert(1)</script>`), "headline", `Fixes "apps" & more`), nil)
-	e := st.byEmail["maya@example.com"]
+	e := list(t, sv.api, with(with(engineerBody(), "name", `Eve <script>alert(1)</script>`), "headline", `Fixes "apps" & more`))
 	get := func(p string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		sv.ServeHTTP(w, httptest.NewRequest("GET", p, nil))
@@ -594,14 +793,16 @@ func TestRequestEmails(t *testing.T) {
 	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test")
 	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	a.now = func() time.Time { return clock }
-	a.routes["POST /api/engineers"](engineerBody(), nil)
-	e := st.byEmail["maya@example.com"]
+	e := list(t, a, engineerBody())
 	hire := func(extra B) Result {
 		b := B{"engineerId": e.ID, "choice": "hourly", "hours": "3", "clientName": "Ann", "clientEmail": "ann@example.com", "clientPhone": "5551234567", "details": "Login breaks after deploy.", "link": "https://github.com/ann/app"}
 		for k, v := range extra {
 			b[k] = v
 		}
-		return a.routes["POST /api/jobs"](b, nil)
+		clock = clock.Add(time.Second)
+		r := a.routes["POST /api/jobs"](b, nil)
+		a.work.Wait()
+		return r
 	}
 	if r := hire(nil); r.Status != 201 || len(mm.sent) != 2 {
 		t.Fatalf("%d, %d emails", r.Status, len(mm.sent))
@@ -619,14 +820,15 @@ func TestRequestEmails(t *testing.T) {
 	if !strings.Contains(mm.sent[2].text, "What: Deploy your app ($400, about 5 days)") || strings.Contains(mm.sent[2].text, "Link:") {
 		t.Errorf("package request email:\n%s", mm.sent[2].text)
 	}
-	for i := 0; i < 30; i++ {
+	// Hardening (F6, contact harvesting): at most 20 requests per engineer a day.
+	for i := 0; i < 18; i++ {
 		hire(nil)
 	}
-	if len(mm.sent) != 1+askedPerDay {
-		t.Errorf("%d request emails in a day, want %d", len(mm.sent)-1, askedPerDay)
+	if r := hire(nil); r.Status != 429 || r.Body.(map[string]string)["error"] != "engineer-busy" {
+		t.Errorf("21st request in a day: %d %v", r.Status, r.Body)
 	}
-	if len(st.jobs) != 32 {
-		t.Errorf("%d requests saved, want all 32", len(st.jobs))
+	if len(st.jobs) != requestsPerDay || len(mm.sent) != 1+requestsPerDay {
+		t.Errorf("%d requests saved and %d emails, want %d", len(st.jobs), len(mm.sent)-1, requestsPerDay)
 	}
 	clock = clock.Add(25 * time.Hour)
 	a.mail = failMail{}
@@ -644,8 +846,7 @@ func TestVerified(t *testing.T) {
 	st, _ := OpenStore(t.TempDir())
 	mm := &memMail{}
 	a := NewAPI(st, t.TempDir(), mm, "https://codemarcer.test")
-	a.routes["POST /api/engineers"](engineerBody(), nil)
-	e := st.byEmail["maya@example.com"]
+	e := list(t, a, engineerBody())
 	if r := a.routes["POST /api/listing/save"](with(with(engineerBody(), "key", mm.key(t, 0)), "verified", true), nil); r.Status != 200 || e.Verified {
 		t.Fatal("an engineer verified themselves")
 	}
